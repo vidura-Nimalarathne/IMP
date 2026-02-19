@@ -1,0 +1,113 @@
+UART SERIAL COMMUNICATION GUIDE Jetson Nano ↔ Arduino Mega (Hardware
+UART)
+
+====================================================
+ 1. SYSTEM OVERVIEW
+==================================================== 
+Jetson Nano: High-level AI / decision logic Arduino Mega: Real-time motor & sensor
+controller Communication: Hardware UART (TX/RX pins)
+
+==================================================== 
+2. VOLTAGE LEVEL WARNING
+ ==================================================== 
+Arduino Mega logic: 5V Jetson Nano logic: 3.3V
+
+Jetson TX → Mega RX = SAFE Mega TX → Jetson RX = MUST use voltage
+divider
+
+==================================================== 
+3. CORRECT WIRING
+==================================================== 
+Jetson Pin 8 (TX) → Mega Pin 19 (RX1) Mega Pin 18 (TX1) → Voltage Divider → Jetson Pin 10
+(RX) Jetson Pin 6 (GND) ↔ Mega GND
+
+==================================================== 
+4. VOLTAGE DIVIDER STRUCTURE 
+==================================================== 
+Mega TX1 —- R1 —-+—-> Jetson RX | R2 | GND
+
+Recommended values: R1 = 1.8kΩ R2 = 3.3kΩ
+
+Common mistake: Wrong divider orientation → Jetson reads ~1.5V → garbage
+data (RAW: b’’). Ensure the end with 1.8kΩ resistor is connected to arduino Mega TX pin, other end 
+is connected to 3.3kΩ resistor and where these two resistors connect, that's where to take a connection that leads to RX pin of Jetson. 
+
+Mega TX1 -----1.8kΩ-----3.3kΩ-----GND
+		    |
+		    |
+		    |
+		    Jetson RX (pin 10)
+
+==================================================== 
+5. DISABLE JETSON SERIAL CONSOLE (nvgetty)
+==================================================== 
+at system bootup, jetson is automatically using serial console so I can't use it. So I must disable it first.
+I had to add these commands in sequence to nuke nvgetty.
+
+sudo systemctl stop nvgetty 
+sudo systemctl disable nvgetty 
+sudo systemctl mask nvgetty 
+sudo reboot
+
+Verify nothing uses UART: sudo lsof /dev/ttyTHS1
+
+==================================================== 
+6. FIX UART PERMISSIONS 
+==================================================== 
+even after nuking nvgetty, i couldnt use serial console as I do not automatically have permission. So i must get persmission.
+
+If permission denied occurs:
+
+sudo nano /etc/udev/rules.d/99-jetson-uart.rules
+
+Add: KERNEL==“ttyTHS1”, MODE=“0666”
+
+Then: sudo udevadm control –reload-rules sudo udevadm trigger
+
+Verify: ls -l /dev/ttyTHS1 Should show: crw-rw-rw-
+
+==================================================== 
+7. BAUD RATE STABILITY 
+==================================================== 
+115200 may be unstable on breadboard wiring. 57600 sometimes unstable. 9600 is
+very stable and sufficient for robot control. due to all the wiring interferences, I could not get clean messages sent between the two devices.
+I had to bring down baud rate to 9600 to have consistent, clean messages sent and received.
+
+==================================================== 
+8. DEBUGGING STRATEGY 
+====================================================
+
+Jetson loopback test: Connect Jetson Pin 8 → Pin 10 If data echoes,
+Jetson UART works. use  this to isolate the issue is from mega TX1 to jetson RX1 wire (the one with voltage divider).
+
+Use RAW byte debug in Python: raw = ser.readline() print(raw)
+
+Interpretation: b’’ → no data b’’ → noise / wrong voltage Random bytes →
+baud mismatch or wiring issue
+
+==================================================== 
+9. FINAL ARDUINO FEATURES 
+==================================================== 
+- Motion state machine - Timed movement - Safety watchdog - ACK feedback -
+Structured packet parsing
+
+Watchdog example: if (millis() - lastCommandTime > WATCHDOG_TIMEOUT) {
+stopMotors(); }
+
+==================================================== 
+10. COMMON PROBLEMS CHECKLIST 
+====================================================
+Permission denied → udev rule not set getty keeps appearing → nvgetty
+not disabled RAW b’’ → divider wired wrong Garbage characters → baud too
+high / noisy wiring Serial1 not declared → wrong board selected Nothing
+received → RX/TX swapped Works direct but not divider → divider
+orientation wrong
+
+==================================================== 
+FINAL TAKEAWAY
+==================================================== 
+UART debugging is:
+40% Linux configuration 40% wiring issues 10% baud rate 10% code
+
+Always: 1. Disable nvgetty first 2. Fix permissions second 3. Test
+Jetson loopback 4. Share ground 5. Lower baud rate if unstable
