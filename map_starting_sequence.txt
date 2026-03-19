@@ -1,0 +1,19 @@
+1
+roscore
+
+2
+source ~/catkin_ws/devel/setup.bash
+roslaunch rplidar_ros rplidar_c1.launch
+
+3
+python ~/robot_project/jcserver_mapping_ros.py
+
+4
+rosrun tf static_transform_publisher 0 0 0.1 0 0 0 base_link laser 100
+
+5
+rosrun gmapping slam_gmapping scan:=/scan _tf_delay:=0.5 _temporalUpdate:=0.5 _linearUpdate:=0.2 _angularUpdate:=0.1 _transform_publish_period:=0.05
+
+6
+source ~/catkin_ws/devel/setup.bash
+python -u ~/robot_project/map_mjpeg_server.py
