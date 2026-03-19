@@ -20,7 +20,7 @@ PORT = 5005
 
 VALID = {"F", "R", "S", "C", "A", "D", "L"}
 
-# ===== ROBOT PARAMETERS (ADJUST LATER IF NEEDED) =====
+# ===== ROBOT PARAMETERS =====
 WHEEL_DIAMETER_M = 0.065
 WHEEL_BASE_M     = 0.190
 TICKS_PER_REV    = 390.0
@@ -113,9 +113,16 @@ def publish_odom(odom_pub, tf_broadcaster, left_ticks, right_ticks):
     dc = (dl + dr) / 2.0
     dth = (dr - dl) / WHEEL_BASE_M
 
-    pose_x += dc * math.cos(pose_th + dth / 2.0)
-    pose_y += dc * math.sin(pose_th + dth / 2.0)
+    # ===== TEMP TEST CHANGE START =====
+    # Real odometry update is temporarily bypassed.
+    # This forces fake forward motion so we can test whether:
+    # 1) gmapping accepts odom
+    # 2) /map updates
+    # 3) UI stops showing "Waiting for /map ..."
+    pose_x += 0.01
+    pose_y += 0.0
     pose_th = normalize_angle(pose_th + dth)
+    # ===== TEMP TEST CHANGE END =====
 
     vx = dc / dt
     vth = dth / dt
@@ -137,6 +144,7 @@ def publish_odom(odom_pub, tf_broadcaster, left_ticks, right_ticks):
 
     odom.pose.pose.position.x = pose_x
     odom.pose.pose.position.y = pose_y
+    odom.pose.pose.position.z = 0.0
     odom.pose.pose.orientation = Quaternion(*q)
 
     odom.twist.twist.linear.x = vx
@@ -202,7 +210,10 @@ def handle_client(conn, addr, ser):
         print("[NET ERROR]", e)
 
     finally:
-        send_uart(ser, "<S>")
+        try:
+            send_uart(ser, "<S>")
+        except Exception:
+            pass
         conn.close()
         print("[NET] Client disconnected:", addr)
 
@@ -227,6 +238,7 @@ def main():
     t1.start()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((HOST, PORT))
     s.listen(5)
 
