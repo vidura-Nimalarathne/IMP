@@ -1,0 +1,11 @@
+rosrun amcl amcl scan:=/scan \
+  _odom_frame_id:=odom \
+  _base_frame_id:=base_link \
+  _global_frame_id:=map \
+  _min_particles:=200 \
+  _max_particles:=2000 \
+  _update_min_d:=0.05 \
+  _update_min_a:=0.05 \
+  _laser_max_beams:=60 \
+  _kld_err:=0.02 \
+  _kld_z:=0.99
