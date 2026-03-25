@@ -46,7 +46,7 @@ MAX_TICK_JUMP_R = 80
 
 # Reject impossible robot motion in one update
 MAX_LINEAR_STEP_M = 0.08      # 8 cm per update
-MAX_ANGULAR_STEP_RAD = 0.35   # ~20 degrees per update
+MAX_ANGULAR_STEP_RAD = 0.8   # ~20 degrees per update
 
 # Optional twist clamps for published /odom
 MAX_LINEAR_VEL = 0.8          # m/s
@@ -174,11 +174,26 @@ def publish_odom(odom_pub, tf_broadcaster, left_ticks, right_ticks):
         prev_time = now
 
     # Reject impossible tick jumps
-    if abs(dleft_ticks) > MAX_TICK_JUMP_L or abs(dright_ticks) > MAX_TICK_JUMP_R:
-        print("[ODOM] Rejected tick jump: dL={}, dR={}".format(
-            int(dleft_ticks), int(dright_ticks)
-        ))
-        return
+    
+        turning = (dleft_ticks * dright_ticks) < 0
+
+        if turning:
+            limit_l = 140
+            limit_r = 140
+        else:
+            limit_l = 80
+            limit_r = 80
+    
+        orig_dl = dleft_ticks
+        orig_dr = dright_ticks
+    
+        dleft_ticks = clamp(dleft_ticks, -limit_l, limit_l)
+        dright_ticks = clamp(dright_ticks, -limit_r, limit_r)
+    
+        if dleft_ticks != orig_dl or dright_ticks != orig_dr:
+            print("[ODOM] Clamped tick jump: dL={}→{}, dR={}→{}".format(
+                int(orig_dl), int(dleft_ticks), int(orig_dr), int(dright_ticks)
+            ))
 
     left_dist_per_tick = (math.pi * WHEEL_DIAMETER_M) / LEFT_TICKS_PER_REV
     right_dist_per_tick = (math.pi * WHEEL_DIAMETER_M) / RIGHT_TICKS_PER_REV
