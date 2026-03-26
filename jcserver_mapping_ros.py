@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from __future__ import print_function
+from geometry_msg import Twist
 
 import math
 import socket
@@ -20,16 +21,53 @@ PORT = 5005
 
 VALID = {"F", "R", "S", "C", "A", "D", "L"}
 
+#to tie cmd_vel (ros velocity commands for auto navigation) to command sent to arduino mega
+cmd_vel_lock = threading.Lock()
+last_cmd_sent = "S"
+last_cmd_time = 0.0
+
+CMD_DEADBAND_LINEAR = 0.03
+CMD_DEADBAND_ANGULAR = 0.20
+CMD_REPEAT_INTERVAL = 0.2
+
+ser_global = None
+
+
 # ===== ROBOT PARAMETERS =====
 WHEEL_DIAMETER_M = 0.065
-WHEEL_BASE_M     = 0.190
-TICKS_PER_REV    = 390.0
+WHEEL_BASE_M = 0.235
 
-LEFT_SIGN  = 1.0
-RIGHT_SIGN = 1.0
+LEFT_TICKS_PER_REV = 1200
+RIGHT_TICKS_PER_REV = 1400
+
+# Flip sign later if one side turns out reversed
+LEFT_SIGN = -1.0
+RIGHT_SIGN = -1.0
 
 ODOM_FRAME = "odom"
 BASE_FRAME = "base_link"
+
+# ===== ODOM FILTER / SANITY LIMITS =====
+# Ignore unrealistically fast packet intervals
+MIN_DT = 0.02        # 20 ms
+
+# Cap long delays so computed twist does not become meaningless
+MAX_DT = 0.30        # 300 ms
+
+# Clamp encoder jumps in one update.
+# Use larger limits during turning because opposite-sign wheel motion is expected.
+MAX_TICK_JUMP_L_STRAIGHT = 80
+MAX_TICK_JUMP_R_STRAIGHT = 80
+MAX_TICK_JUMP_L_TURN = 140
+MAX_TICK_JUMP_R_TURN = 140
+
+# Reject impossible robot motion in one update
+MAX_LINEAR_STEP_M = 0.08      # 8 cm per update
+MAX_ANGULAR_STEP_RAD = 0.8    # ~46 degrees per update
+
+# Optional twist clamps for published /odom
+MAX_LINEAR_VEL = 0.8          # m/s
+MAX_ANGULAR_VEL = 3.0         # rad/s
 
 clients_lock = threading.Lock()
 clients = []
@@ -53,7 +91,7 @@ def broadcast_to_clients(message):
     with clients_lock:
         for conn in clients:
             try:
-                conn.sendall((message + "\n").encode("utf-8"))
+                conn.sendall((message + "\n").encode("ascii", "ignore"))
             except Exception:
                 dead.append(conn)
 
@@ -62,6 +100,39 @@ def broadcast_to_clients(message):
                 clients.remove(conn)
             except ValueError:
                 pass
+
+def cmd_vel_callback(msg):
+    global last_cmd_sent, last_cmd_time
+
+    lin = msg.linear.x
+    ang = msg.angular.z
+
+    if abs(lin) < CMD_DEADBAND_LINEAR and abs(ang) < CMD_DEADBAND_ANGULAR:
+        cmd = "S"
+    elif abs(ang) >= CMD_DEADBAND_ANGULAR:
+        if ang > 0:
+            cmd = "A"   # CCW / left
+        else:
+            cmd = "D"   # CW / right
+    elif lin > CMD_DEADBAND_LINEAR:
+        cmd = "F"
+    elif lin < -CMD_DEADBAND_LINEAR:
+        cmd = "R"
+    else:
+        cmd = "S"
+
+    now = time.time()
+
+    with cmd_vel_lock:
+        # avoid spamming identical commands too fast
+        if cmd != last_cmd_sent or (now - last_cmd_time) >= CMD_REPEAT_INTERVAL:
+            try:
+                send_uart(ser_global, "<{}>".format(cmd))
+                last_cmd_sent = cmd
+                last_cmd_time = now
+                print("[CMD_VEL] lin={:.3f}, ang={:.3f} -> {}".format(lin, ang, cmd))
+            except Exception as e:
+                print("[CMD_VEL ERROR]", e)
 
 
 def normalize_angle(a):
@@ -72,9 +143,47 @@ def normalize_angle(a):
     return a
 
 
+def clamp(val, lo, hi):
+    if val < lo:
+        return lo
+    if val > hi:
+        return hi
+    return val
+
+
 def send_uart(ser, msg):
     with ser_lock:
-        ser.write((msg + "\n").encode("utf-8"))
+        ser.write((msg + "\n").encode("ascii", "ignore"))
+
+
+def parse_odo_packet(line):
+    """
+    Accept only exact packets like:
+      <ODO,596,628>
+    Return (left, right) or None
+    """
+    if not line:
+        return None
+
+    if not (line.startswith("<ODO,") and line.endswith(">")):
+        return None
+
+    body = line[1:-1]   # remove < >
+    parts = body.split(",")
+
+    if len(parts) != 3:
+        return None
+
+    if parts[0] != "ODO":
+        return None
+
+    try:
+        left = int(parts[1])
+        right = int(parts[2])
+    except ValueError:
+        return None
+
+    return (left, right)
 
 
 def publish_odom(odom_pub, tf_broadcaster, left_ticks, right_ticks):
@@ -88,44 +197,79 @@ def publish_odom(odom_pub, tf_broadcaster, left_ticks, right_ticks):
         latest_left = left_ticks
         latest_right = right_ticks
 
+        # First valid sample: initialize baseline only
         if prev_left is None:
             prev_left = left_ticks
             prev_right = right_ticks
             prev_time = now
             return
 
-        dt = (now - prev_time).to_sec()
-        if dt <= 0.0:
-            dt = 1e-3
+        raw_dt = (now - prev_time).to_sec()
 
-        dleft_ticks  = (left_ticks  - prev_left)  * LEFT_SIGN
+        # Ignore unrealistically tiny dt bursts
+        if raw_dt < MIN_DT:
+            return
+
+        # Clamp very long dt gaps
+        dt = raw_dt
+        if dt > MAX_DT:
+            dt = MAX_DT
+
+        dleft_ticks = (left_ticks - prev_left) * LEFT_SIGN
         dright_ticks = (right_ticks - prev_right) * RIGHT_SIGN
 
+        # Move baseline forward immediately after reading deltas
         prev_left = left_ticks
         prev_right = right_ticks
         prev_time = now
 
-    dist_per_tick = (math.pi * WHEEL_DIAMETER_M) / TICKS_PER_REV
+    # Clamp tick jumps instead of rejecting them outright.
+    # Real turning often produces opposite-sign wheel deltas.
+    turning = (dleft_ticks * dright_ticks) < 0
 
-    dl = dleft_ticks * dist_per_tick
-    dr = dright_ticks * dist_per_tick
+    if turning:
+        limit_l = MAX_TICK_JUMP_L_TURN
+        limit_r = MAX_TICK_JUMP_R_TURN
+    else:
+        limit_l = MAX_TICK_JUMP_L_STRAIGHT
+        limit_r = MAX_TICK_JUMP_R_STRAIGHT
+
+    orig_dl = dleft_ticks
+    orig_dr = dright_ticks
+
+    dleft_ticks = clamp(dleft_ticks, -limit_l, limit_l)
+    dright_ticks = clamp(dright_ticks, -limit_r, limit_r)
+
+    if dleft_ticks != orig_dl or dright_ticks != orig_dr:
+        print("[ODOM] Clamped tick jump: dL={}->{}, dR={}->{}".format(
+            int(orig_dl), int(dleft_ticks), int(orig_dr), int(dright_ticks)
+        ))
+
+    left_dist_per_tick = (math.pi * WHEEL_DIAMETER_M) / LEFT_TICKS_PER_REV
+    right_dist_per_tick = (math.pi * WHEEL_DIAMETER_M) / RIGHT_TICKS_PER_REV
+
+    dl = dleft_ticks * left_dist_per_tick
+    dr = dright_ticks * right_dist_per_tick
 
     dc = (dl + dr) / 2.0
     dth = (dr - dl) / WHEEL_BASE_M
 
-    # ===== TEMP TEST CHANGE START =====
-    # Real odometry update is temporarily bypassed.
-    # This forces fake forward motion so we can test whether:
-    # 1) gmapping accepts odom
-    # 2) /map updates
-    # 3) UI stops showing "Waiting for /map ..."
-    pose_x += 0.01
-    pose_y += 0.0
+    # Reject impossible motion steps
+    if abs(dc) > MAX_LINEAR_STEP_M or abs(dth) > MAX_ANGULAR_STEP_RAD:
+        print("[ODOM] Rejected motion step: dc={:.4f} m, dth={:.4f} rad".format(dc, dth))
+        return
+
+    # Midpoint integration
+    pose_x += dc * math.cos(pose_th + dth / 2.0)
+    pose_y += dc * math.sin(pose_th + dth / 2.0)
     pose_th = normalize_angle(pose_th + dth)
-    # ===== TEMP TEST CHANGE END =====
 
     vx = dc / dt
     vth = dth / dt
+
+    # Clamp published twist to avoid absurd spikes in /odom
+    vx = clamp(vx, -MAX_LINEAR_VEL, MAX_LINEAR_VEL)
+    vth = clamp(vth, -MAX_ANGULAR_VEL, MAX_ANGULAR_VEL)
 
     q = tf.transformations.quaternion_from_euler(0, 0, pose_th)
 
@@ -148,6 +292,10 @@ def publish_odom(odom_pub, tf_broadcaster, left_ticks, right_ticks):
     odom.pose.pose.orientation = Quaternion(*q)
 
     odom.twist.twist.linear.x = vx
+    odom.twist.twist.linear.y = 0.0
+    odom.twist.twist.linear.z = 0.0
+    odom.twist.twist.angular.x = 0.0
+    odom.twist.twist.angular.y = 0.0
     odom.twist.twist.angular.z = vth
 
     odom_pub.publish(odom)
@@ -158,26 +306,35 @@ def serial_reader(ser, odom_pub, tf_broadcaster):
 
     while not rospy.is_shutdown():
         try:
-            line = ser.readline().decode("utf-8", errors="ignore").strip()
+            raw = ser.readline()
+
+            if not raw:
+                continue
+
+            # Decode safely. Any corrupted bytes are ignored.
+            line = raw.decode("utf-8", errors="ignore").strip()
+
             if not line:
                 continue
 
-            print("[MEGA] {}".format(line))
+            parsed = parse_odo_packet(line)
+            if parsed is None:
+                # Ignore bad/corrupted packets silently
+                continue
 
-            if line.startswith("<ODO,") and line.endswith(">"):
-                body = line[1:-1]
-                parts = body.split(",")
+            left, right = parsed
 
-                if len(parts) == 3:
-                    left = int(parts[1])
-                    right = int(parts[2])
+            # Print only sanitized packet
+            print("[MEGA] <ODO,{},{:d}>".format(left, right))
 
-                    publish_odom(odom_pub, tf_broadcaster, left, right)
-                    broadcast_to_clients("<ODO,{},{:d}>".format(left, right))
+            publish_odom(odom_pub, tf_broadcaster, left, right)
+
+            # Rebroadcast only clean data
+            broadcast_to_clients("<ODO,{},{:d}>".format(left, right))
 
         except Exception as e:
             print("[UART ERROR]", e)
-            time.sleep(0.1)
+            time.sleep(0.05)
 
 
 def handle_client(conn, addr, ser):
@@ -192,19 +349,24 @@ def handle_client(conn, addr, ser):
             if not data:
                 break
 
-            msg = data.decode().strip()
+            msg = data.decode("ascii", "ignore").strip()
+            if not msg:
+                continue
+
             print("[NET RX]", msg)
 
-            if msg.startswith("<CMD:"):
+            if msg.startswith("<CMD:") and len(msg) >= 7:
                 cmd = msg[5]
+
+                # Keep old UI compatibility
                 if cmd == "L":
                     cmd = "D"
 
                 if cmd in VALID:
                     send_uart(ser, "<{}>".format(cmd))
-                    conn.sendall("<ACK:{}>\n".format(cmd).encode())
+                    conn.sendall("<ACK:{}>\n".format(cmd).encode("ascii", "ignore"))
                 else:
-                    conn.sendall("<ERR>\n".encode())
+                    conn.sendall("<ERR>\n".encode("ascii", "ignore"))
 
     except Exception as e:
         print("[NET ERROR]", e)
@@ -214,6 +376,13 @@ def handle_client(conn, addr, ser):
             send_uart(ser, "<S>")
         except Exception:
             pass
+
+        with clients_lock:
+            try:
+                clients.remove(conn)
+            except ValueError:
+                pass
+
         conn.close()
         print("[NET] Client disconnected:", addr)
 
@@ -222,12 +391,16 @@ def main():
     rospy.init_node("jcserver_mapping_ros")
 
     odom_pub = rospy.Publisher("/odom", Odometry, queue_size=20)
+    rospy.Subscriber("/cmd_vel", Twist, cmd_vel_callback, queue_size=10)
     tf_broadcaster = tf.TransformBroadcaster()
 
     print("[SYS] Starting jcserver_mapping_ros...")
 
+    global ser_global
     ser = serial.Serial(UART_DEV, UART_BAUD, timeout=0.05)
+    ser_global = ser
     time.sleep(0.5)
+
     print("[UART] Opened", UART_DEV)
 
     t1 = threading.Thread(
@@ -245,7 +418,11 @@ def main():
     print("[NET] Listening on", HOST, PORT)
 
     while not rospy.is_shutdown():
-        conn, addr = s.accept()
+        try:
+            conn, addr = s.accept()
+        except Exception as e:
+            print("[NET ACCEPT ERROR]", e)
+            continue
 
         t2 = threading.Thread(
             target=handle_client,
