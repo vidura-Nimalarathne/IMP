@@ -1,1 +1,18 @@
 export PYTHONPATH=$PYTHONPATH:/home/vidura/jetson-inference/python/python:/home/vidura/jetson-inference/build/aarch64/lib/python/3.6:/home/vidura/jetson-inference/utils/python/python
+
+
+vidura@viduranimalarathne:~$ export PYTHONPATH=$PYTHONPATH:/home/vidura/jetson-inference/python/python:/home/vidura/jetson-inference/build/aarch64/lib/python/3.6:/home/vidura/jetson-inference/utils/python/python
+vidura@viduranimalarathne:~$ python3 ~/catkin_ws/src/robot_nav/scripts/dog_detectionv2.py
+Traceback (most recent call last):
+  File "/home/vidura/catkin_ws/src/robot_nav/scripts/dog_detectionv2.py", line 5, in <module>
+    import rospy
+  File "/opt/ros/melodic/lib/python2.7/dist-packages/rospy/__init__.py", line 49, in <module>
+    from .client import spin, myargv, init_node, \
+  File "/opt/ros/melodic/lib/python2.7/dist-packages/rospy/client.py", line 52, in <module>
+    import roslib
+  File "/opt/ros/melodic/lib/python2.7/dist-packages/roslib/__init__.py", line 50, in <module>
+    from roslib.launcher import load_manifest  # noqa: F401
+  File "/opt/ros/melodic/lib/python2.7/dist-packages/roslib/launcher.py", line 42, in <module>
+    import rospkg
+ModuleNotFoundError: No module named 'rospkg'
+vidura@viduranimalarathne:~$ 
