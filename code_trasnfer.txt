@@ -9,3 +9,35 @@ source /opt/ros/melodic/setup.bash
 source ~/catkin_ws/devel/setup.bash
 rostopic echo /dog_detected
 
+roscore
+
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+roslaunch rplidar_ros rplidar_c1.launch
+
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+python ~/robot_project/jcserver_mapping_ros.py
+
+rosrun tf static_transform_publisher 0 0 0.25 3.14159 0 0  base_link laser 100
+
+rosrun map_server map_server ~/room_map_v3.yaml
+
+rosrun amcl amcl scan:=/scan \
+  _odom_frame_id:=odom \
+  _base_frame_id:=base_link \
+  _global_frame_id:=map \
+  _min_particles:=200 \
+  _max_particles:=2000 \
+  _update_min_d:=0.05 \
+  _update_min_a:=0.05 \
+  _laser_max_beams:=60 \
+  _kld_err:=0.02 \
+  _kld_z:=0.99
+
+rosrun tf tf_echo odom base_link
+
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+roslaunch robot_nav move_base.launch
+
