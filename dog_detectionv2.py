@@ -25,11 +25,11 @@ def main():
     FPS = 30
 
     camera = jetson_utils.videoSource(
-        f"v4l2://{DEV}",
+        "v4l2://{}".format(DEV),
         argv=[
-            f"--input-width={WIDTH}",
-            f"--input-height={HEIGHT}",
-            f"--input-rate={FPS}",
+            "--input-width={}".format(WIDTH),
+            "--input-height={}".format(HEIGHT),
+            "--input-rate={}".format(FPS),
             "--input-codec=mjpeg",
         ],
     )
