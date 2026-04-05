@@ -1,4 +1,10 @@
-<param name="controller_frequency" value="2.0" />
-<param name="planner_frequency" value="1.0" />
-<param name="controller_patience" value="5.0" />
-<param name="planner_patience" value="3.0" />
+chmod +x ~/catkin_ws/src/roboot_nav/scripts/waypoint_dog_search.py
+chmod +x ~/catkin_ws/src/roboot_nav/scripts/dog_detectionv2.py
+
+cd ~/catkin_ws
+catkin_make
+source devel/setup.bash
+
+rosrun roboot_nav dog_detectionv2.py
+rosrun roboot_nav waypoint_dog_search.py
+
