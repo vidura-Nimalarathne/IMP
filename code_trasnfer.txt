@@ -8,3 +8,9 @@ source devel/setup.bash
 rosrun roboot_nav dog_detectionv2.py
 rosrun roboot_nav waypoint_dog_search.py
 
+vidura@viduranimalarathne:~/catkin_ws$ rosrun robot_nav dog_detectionv2.py
+  File "/home/vidura/catkin_ws/src/robot_nav/scripts/dog_detectionv2.py", line 28
+    f"v4l2://{DEV}",
+                  ^
+SyntaxError: invalid syntax
+vidura@viduranimalarathne:~/catkin_ws$ 
