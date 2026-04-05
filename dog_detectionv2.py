@@ -1,9 +1,9 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import os
-os.chdir("/home/vidura/jetson-inference/data")
+import subprocess
+import time
 
-import rospy
-from std_msgs.msg import Bool
+os.chdir("/home/vidura/jetson-inference/data")
 
 import jetson_inference
 import jetson_utils
@@ -12,11 +12,21 @@ DOG_ID = 18
 TEDDY_BEAR_ID = 88
 THRESHOLD = 0.5
 REQUIRED_CONSECUTIVE_FRAMES = 3
+TRIGGER_COOLDOWN = 5.0  # seconds
+
+def publish_dog_detected():
+    try:
+        subprocess.Popen([
+            "rostopic", "pub", "-1",
+            "/dog_detected",
+            "std_msgs/Bool",
+            "data: true"
+        ])
+        print("[ROS] Published /dog_detected = True")
+    except Exception as e:
+        print("[ROS ERROR] Failed to publish /dog_detected: {}".format(e))
 
 def main():
-    rospy.init_node("dog_detector_node")
-    dog_pub = rospy.Publisher("/dog_detected", Bool, queue_size=1)
-
     net = jetson_inference.detectNet("ssd-mobilenet-v2", threshold=THRESHOLD)
 
     DEV = "/dev/video0"
@@ -37,8 +47,10 @@ def main():
     display = jetson_utils.videoOutput("display://0")
 
     detect_count = 0
+    already_triggered = False
+    last_trigger_time = 0.0
 
-    while not rospy.is_shutdown() and display.IsStreaming():
+    while display.IsStreaming():
         img = camera.Capture()
         if img is None:
             continue
@@ -46,24 +58,35 @@ def main():
         detections = net.Detect(img)
 
         dog_present = False
+
         for d in detections:
             cid = int(d.ClassID)
-            if cid in (DOG_ID, TEDDY_BEAR_ID) and d.Confidence >= THRESHOLD:
+            conf = float(d.Confidence)
+
+            if cid in (DOG_ID, TEDDY_BEAR_ID) and conf >= THRESHOLD:
                 dog_present = True
-                print("[DETECT] {} {:.1f}%".format(net.GetClassDesc(cid), d.Confidence * 100.0))
+                print("[DETECT] {} {:.1f}%".format(
+                    net.GetClassDesc(cid), conf * 100.0
+                ))
 
         if dog_present:
             detect_count += 1
         else:
             detect_count = 0
+            already_triggered = False
 
         confirmed = detect_count >= REQUIRED_CONSECUTIVE_FRAMES
-        dog_pub.publish(Bool(data=confirmed))
+
+        now = time.time()
+        if confirmed and (not already_triggered) and ((now - last_trigger_time) > TRIGGER_COOLDOWN):
+            publish_dog_detected()
+            already_triggered = True
+            last_trigger_time = now
 
         display.Render(img)
         display.SetStatus(
-            "Dog Detector | FPS: {:.1f} | detected: {} | confirmed: {}".format(
-                net.GetNetworkFPS(), dog_present, confirmed
+            "Dog Detector | FPS: {:.1f} | detected: {} | confirmed: {} | count: {}".format(
+                net.GetNetworkFPS(), dog_present, confirmed, detect_count
             )
         )
 
