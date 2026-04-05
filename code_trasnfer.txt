@@ -1,3 +1,4 @@
 
 python -c "import jetson_inference; print('jetson_inference OK')"
 python -c "import jetson_utils; print('jetson_utils OK')"
+export PYTHONPATH=$PYTHONPATH:/home/vidura/jetson-inference/python/python:/home/vidura/jetson-inference/build/aarch64/lib/python/3.6
