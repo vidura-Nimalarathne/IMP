@@ -1,13 +1,94 @@
-vidura@viduranimalarathne:~$ rosrun robot_nav waypoint_dog_search.py
-[INFO] [1775468632.459348]: Waiting for move_base action server...
-[INFO] [1775468632.705222]: Connected to move_base
-[INFO] [1775468632.729312]: Starting waypoint dog search with 3 waypoints
-[INFO] [1775468632.734297]: Sending goal: HOME
-[WARN] [1775468664.779768]: Failed waypoint HOME with state 4
-[INFO] [1775468665.786530]: Sending goal: HOME
-[WARN] [1775468697.757654]: Failed waypoint HOME with state 4
-[WARN] [1775468698.764431]: Giving up on waypoint: HOME
-[INFO] [1775468698.770219]: Sending goal: WAY1
-^C[WARN] [1775468724.482569]: Timeout reaching WAY1. Cancelling goal.
-[WARN] [1775468725.488842]: Giving up on waypoint: WAY1
+#!/usr/bin/env python
+import rospy
+from std_msgs.msg import Bool, String
+from geometry_msgs.msg import Twist
 
+class SimpleSearch(object):
+    def __init__(self):
+        rospy.init_node('simple_autonomous_search')
+
+        self.cmd_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
+        self.gui_pub = rospy.Publisher('/gui_status', String, queue_size=1)
+
+        rospy.Subscriber('/dog_detected', Bool, self.dog_callback)
+        rospy.Subscriber('/start_autonomous', Bool, self.start_callback)
+
+        self.dog_found = False
+        self.active = False
+
+    def dog_callback(self, msg):
+        if msg.data:
+            rospy.logwarn("DOG FOUND!")
+            self.dog_found = True
+            self.stop_robot()
+            self.gui_pub.publish("DOG FOUND")
+            self.active = False
+
+    def start_callback(self, msg):
+        if msg.data:
+            rospy.loginfo("Autonomous search started")
+            self.active = True
+            self.dog_found = False
+            self.run_sequence()
+
+    def stop_robot(self):
+        self.cmd_pub.publish(Twist())
+
+    def move_forward(self, duration):
+        twist = Twist()
+        twist.linear.x = 0.15
+        rate = rospy.Rate(10)
+        start = rospy.Time.now()
+
+        while (rospy.Time.now() - start).to_sec() < duration:
+            if self.dog_found or not self.active:
+                return
+            self.cmd_pub.publish(twist)
+            rate.sleep()
+
+        self.stop_robot()
+
+    def turn_right_90(self):
+        twist = Twist()
+        twist.angular.z = -0.5   # CW turn
+        duration = 2.5           # adjust if needed
+
+        rate = rospy.Rate(10)
+        start = rospy.Time.now()
+
+        while (rospy.Time.now() - start).to_sec() < duration:
+            if self.dog_found or not self.active:
+                return
+            self.cmd_pub.publish(twist)
+            rate.sleep()
+
+        self.stop_robot()
+
+    def run_sequence(self):
+        rospy.loginfo("Step 1: Forward 3 sec")
+        self.move_forward(3.0)
+
+        if self.dog_found: return
+
+        rospy.sleep(1.0)
+
+        rospy.loginfo("Step 2: Turn 90 CW")
+        self.turn_right_90()
+
+        if self.dog_found: return
+
+        rospy.sleep(1.0)
+
+        rospy.loginfo("Step 3: Forward 2 sec")
+        self.move_forward(2.0)
+
+        self.stop_robot()
+        self.active = False
+        rospy.loginfo("Search sequence complete")
+
+if __name__ == '__main__':
+    try:
+        node = SimpleSearch()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass
