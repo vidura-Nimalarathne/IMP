@@ -1,36 +1,8 @@
-<launch>
-  <!-- LiDAR -->
-  <include file="$(find rplidar_ros)/launch/rplidar_c1.launch" />
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+export PYTHONPATH=$PYTHONPATH:/home/vidura/jetson-inference/python/python:/home/vidura/jetson-inference/build/aarch64/lib/python/3.6:/home/vidura/jetson-inference/utils/python/python
+python3 ~/catkin_ws/src/robot_nav/scripts/dog_detectionv2.py
 
-  <!-- Jetson server -->
-  <node pkg="robot_nav" type="jcserver_mapping_ros.py" name="jcserver_mapping_ros" output="screen" />
-
-  <!-- Static TF -->
-  <node pkg="tf" type="static_transform_publisher" name="base_to_laser_tf"
-        args="0 0 0.25 3.14159 0 0 base_link laser 100" />
-
-  <!-- Map server -->
-  <node pkg="map_server" type="map_server" name="map_server"
-        args="/home/vidura/room_map_v3.yaml" output="screen" />
-
-  <!-- AMCL -->
-  <node pkg="amcl" type="amcl" name="amcl" output="screen">
-    <remap from="scan" to="/scan"/>
-    <param name="odom_frame_id" value="odom" />
-    <param name="base_frame_id" value="base_link" />
-    <param name="global_frame_id" value="map" />
-    <param name="min_particles" value="200" />
-    <param name="max_particles" value="2000" />
-    <param name="update_min_d" value="0.05" />
-    <param name="update_min_a" value="0.05" />
-    <param name="laser_max_beams" value="60" />
-    <param name="kld_err" value="0.02" />
-    <param name="kld_z" value="0.99" />
-  </node>
-
-  <!-- move_base -->
-  <include file="$(find robot_nav)/launch/move_base.launch" />
-
-  <!-- Waypoint search -->
-  <node pkg="robot_nav" type="waypoint_dog_search.py" name="waypoint_dog_search" output="screen" />
-</launch>
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+rostopic echo /dog_detected
