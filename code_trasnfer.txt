@@ -1,8 +1,17 @@
-source /opt/ros/melodic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-export PYTHONPATH=$PYTHONPATH:/home/vidura/jetson-inference/python/python:/home/vidura/jetson-inference/build/aarch64/lib/python/3.6:/home/vidura/jetson-inference/utils/python/python
-python3 ~/catkin_ws/src/robot_nav/scripts/dog_detectionv2.py
-
-source /opt/ros/melodic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-rostopic echo /dog_detected
+[ WARN] [1775455012.829120232]: Clearing both costmaps to unstuck robot (1.84m).
+[ WARN] [1775455016.329110627]: Rotate recovery behavior started.
+[ERROR] [1775455016.329430373]: Rotate recovery can't rotate in place because there is a potential collision. Cost: -1.00
+[ERROR] [1775455019.829071740]: Aborting because a valid plan could not be found. Even after executing all recovery behaviors
+[ WARN] [1775455284.536565014]: Clearing both costmaps to unstuck robot (3.00m).
+[ WARN] [1775455288.036561618]: Rotate recovery behavior started.
+[ERROR] [1775455288.037085125]: Rotate recovery can't rotate in place because there is a potential collision. Cost: -1.00
+[ WARN] [1775455291.536549216]: Clearing both costmaps to unstuck robot (1.84m).
+[ WARN] [1775455295.036553029]: Rotate recovery behavior started.
+[ERROR] [1775455295.037810155]: Rotate recovery can't rotate in place because there is a potential collision. Cost: -1.00
+[ERROR] [1775455298.536642166]: Aborting because a valid plan could not be found. Even after executing all recovery behaviors
+[ WARN] [1775455303.053885650]: Clearing both costmaps to unstuck robot (3.00m).
+[ WARN] [1775455306.553833116]: Rotate recovery behavior started.
+[ERROR] [1775455306.554118750]: Rotate recovery can't rotate in place because there is a potential collision. Cost: -1.00
+[ WARN] [1775455310.053884985]: Clearing both costmaps to unstuck robot (1.84m).
+[ WARN] [1775455313.553875776]: Rotate recovery behavior started.
+[ERROR] [1775455313.554986959]: Rotate recovery can't rotate in place because there is a potential collision. Cost: -1.00
