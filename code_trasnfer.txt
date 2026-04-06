@@ -1,5 +1,13 @@
-self.waypoints = [
-    ("HOME", 0.00545657781287, -0.95274211708, 0.0, 0.0, 0.741878780148, 0.670534022676),
-    ("WAY1", 0.0371561602993, -1.28957336347, 0.0, 0.0, 0.752510465165, 0.658580291094),
-    ("WAY2", -0.353840444124, -1.57145221713, 0.0, 0.0, 0.325912400991, 0.945399971906),
-]
+vidura@viduranimalarathne:~$ rosrun robot_nav waypoint_dog_search.py
+[INFO] [1775468632.459348]: Waiting for move_base action server...
+[INFO] [1775468632.705222]: Connected to move_base
+[INFO] [1775468632.729312]: Starting waypoint dog search with 3 waypoints
+[INFO] [1775468632.734297]: Sending goal: HOME
+[WARN] [1775468664.779768]: Failed waypoint HOME with state 4
+[INFO] [1775468665.786530]: Sending goal: HOME
+[WARN] [1775468697.757654]: Failed waypoint HOME with state 4
+[WARN] [1775468698.764431]: Giving up on waypoint: HOME
+[INFO] [1775468698.770219]: Sending goal: WAY1
+^C[WARN] [1775468724.482569]: Timeout reaching WAY1. Cancelling goal.
+[WARN] [1775468725.488842]: Giving up on waypoint: WAY1
+
