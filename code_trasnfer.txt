@@ -1,74 +1,67 @@
-costmap_common_params.yaml
+Home possition
 
-obstacle_range: 2.5
-raytrace_range: 3.0
+header: 
+  seq: 67
+  stamp: 
+    secs: 1775467726
+    nsecs: 303540286
+  frame_id: "map"
+pose: 
+  pose: 
+    position: 
+      x: 0.00545657781287
+      y: -0.95274211708
+      z: 0.0
+    orientation: 
+      x: 0.0
+      y: 0.0
+      z: 0.741878780148
+      w: 0.670534022676
+  covariance: [9.029911309561344e-05, -7.619100001968833e-05, 0.0, 0.0, 0.0, 0.0, -7.61910000196892e-05, 0.0015764179922166939, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0009579325940184954]
+---
 
-footprint: [[0.18, 0.13], [0.18, -0.13], [-0.18, -0.13], [-0.18, 0.13]]
 
-inflation_radius: 0.10
-cost_scaling_factor: 10.0
+Way point 1
 
-map_type: costmap
+header: 
+  seq: 70
+  stamp: 
+    secs: 1775467908
+    nsecs: 634296220
+  frame_id: "map"
+pose: 
+  pose: 
+    position: 
+      x: 0.0371561602993
+      y: -1.28957336347
+      z: 0.0
+    orientation: 
+      x: 0.0
+      y: 0.0
+      z: 0.752510465165
+      w: 0.658580291094
+  covariance: [0.00032781892665171777, -0.00027936432069104305, 0.0, 0.0, 0.0, 0.0, -0.00027936432069105, 0.0012151258290954883, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0009774488768157785]
+---
 
-observation_sources: laser_scan_sensor
-laser_scan_sensor:
-  sensor_frame: laser
-  data_type: LaserScan
-  topic: /scan
-  marking: true
-  clearing: true
 
-dwa_local_planner_params.yaml
+way point 2
 
-DWAPlannerROS:
-  max_vel_x: 0.15
-  min_vel_x: 0.05
-
-  max_vel_theta: 0.5
-  min_vel_theta: 0.15
-  min_in_place_vel_theta: 0.15
-
-  acc_lim_x: 0.4
-  acc_lim_theta: 0.6
-
-  xy_goal_tolerance: 0.12
-  yaw_goal_tolerance: 0.25
-  latch_xy_goal_tolerance: false
-
-  sim_time: 1.0
-  vx_samples: 8
-  vtheta_samples: 12
-
-  path_distance_bias: 24.0
-  goal_distance_bias: 18.0
-  occdist_scale: 0.02
-
-  forward_point_distance: 0.15
-  stop_time_buffer: 0.2
-  scaling_speed: 0.2
-  max_scaling_factor: 0.15
-
-global_costmap_params.yaml
-
-global_costmap:
-  global_frame: map
-  robot_base_frame: base_link
-  update_frequency: 2.0
-  publish_frequency: 1.0
-  static_map: true
-  transform_tolerance: 1.0
-  oscillation_reset_dist: 0.01
-
-local_costmap_params.yaml
-
-local_costmap:
-  global_frame: odom
-  robot_base_frame: base_link
-  update_frequency: 5.0
-  publish_frequency: 2.0
-  static_map: false
-  rolling_window: true
-  width: 3.0
-  height: 3.0
-  resolution: 0.05
-  transform_tolerance: 1.0
+header: 
+  seq: 81
+  stamp: 
+    secs: 1775467985
+    nsecs: 760117831
+  frame_id: "map"
+pose: 
+  pose: 
+    position: 
+      x: -0.353840444124
+      y: -1.57145221713
+      z: 0.0
+    orientation: 
+      x: 0.0
+      y: 0.0
+      z: 0.325912400991
+      w: 0.945399971906
+  covariance: [0.0006560757713037079, -0.00022996653135741102, 0.0, 0.0, 0.0, 0.0, -0.00022996653135741102, 0.00030645755106631866, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0006794444373432391]
+---
