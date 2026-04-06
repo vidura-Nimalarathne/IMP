@@ -6,6 +6,9 @@ import socket
 import threading
 import time
 import serial
+import os
+import json
+from datetime import datetime
 
 import rospy
 import tf
@@ -20,11 +23,10 @@ UART_BAUD = 9600
 HOST = "0.0.0.0"
 PORT = 5005
 
+CONFIG_PATH = "/home/vidura/.petbot_feed_config.json"
+
 # Single-character commands that go to Mega
 VALID_UART_COMMANDS = {"F", "R", "S", "C", "A", "D", "L", "K"}
-
-# Word commands handled at bridge level
-VALID_WORD_COMMANDS = {"AUTO"}
 
 # ===== cmd_vel -> Mega bridge =====
 cmd_vel_lock = threading.Lock()
@@ -45,6 +47,13 @@ dog_found = False
 
 # Tune this for your robot for roughly 90 deg clockwise
 AUTO_TURN_90_TIME = 1.20
+
+# ===== feeder state =====
+feed_lock = threading.Lock()
+feed_running = False
+feed_ack_event = threading.Event()
+feeding_time_str = "11:00"
+last_feed_date = ""   # YYYY-MM-DD
 
 # ===== ROBOT PARAMETERS =====
 WHEEL_DIAMETER_M = 0.065
@@ -142,6 +151,55 @@ def stop_robot():
         print("[STOP ERROR]", e)
 
 
+def now_time_str():
+    return datetime.now().strftime("%d-%m-%Y  %I:%M:%S %p")
+
+
+def today_date_str():
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def save_feed_config():
+    data = {
+        "feeding_time": feeding_time_str,
+        "last_feed_date": last_feed_date,
+    }
+
+    try:
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(data, f)
+        print("[FEED] Saved config:", data)
+    except Exception as e:
+        print("[FEED ERROR] Failed to save config:", e)
+
+
+def load_feed_config():
+    global feeding_time_str, last_feed_date
+
+    if not os.path.exists(CONFIG_PATH):
+        print("[FEED] No config found, using defaults")
+        return
+
+    try:
+        with open(CONFIG_PATH, "r") as f:
+            data = json.load(f)
+
+        feeding_time_str = str(data.get("feeding_time", feeding_time_str))
+        last_feed_date = str(data.get("last_feed_date", last_feed_date))
+        print("[FEED] Loaded config:", data)
+
+    except Exception as e:
+        print("[FEED ERROR] Failed to load config:", e)
+
+
+def broadcast_time_status():
+    broadcast_to_clients("<STATUS:TIME:{}>".format(now_time_str()))
+
+
+def broadcast_feedtime_status():
+    broadcast_to_clients("<STATUS:FEEDTIME:{}>".format(feeding_time_str))
+
+
 def dog_detected_callback(msg):
     global dog_found, auto_cancel
 
@@ -153,14 +211,12 @@ def dog_detected_callback(msg):
 
     print("[ROS] /dog_detected = True")
     broadcast_to_clients("<EVENT:DOG_DETECTED>")
-
     stop_robot()
 
 
 def cmd_vel_callback(msg):
     global last_cmd_sent, last_cmd_time, auto_running
 
-    # Ignore /cmd_vel while timed AUTO routine is running
     with auto_lock:
         if auto_running:
             return
@@ -172,9 +228,9 @@ def cmd_vel_callback(msg):
         cmd = "S"
     elif abs(ang) >= CMD_DEADBAND_ANGULAR:
         if ang > 0:
-            cmd = "A"   # CCW / left
+            cmd = "A"
         else:
-            cmd = "D"   # CW / right
+            cmd = "D"
     elif lin > CMD_DEADBAND_LINEAR:
         cmd = "F"
     elif lin < -CMD_DEADBAND_LINEAR:
@@ -196,11 +252,6 @@ def cmd_vel_callback(msg):
 
 
 def parse_odo_packet(line):
-    """
-    Accept only exact packets like:
-      <ODO,596,628>
-    Return (left, right) or None
-    """
     if not line:
         return None
 
@@ -331,6 +382,12 @@ def publish_odom(odom_pub, tf_broadcaster, left_ticks, right_ticks):
     odom_pub.publish(odom)
 
 
+def handle_feeder_ack():
+    feed_ack_event.set()
+    print("[FEED] Ack O received")
+    broadcast_to_clients("<EVENT:FEED_ACK:O>")
+
+
 def serial_reader(ser, odom_pub, tf_broadcaster):
     print("[UART] Reader started")
 
@@ -345,18 +402,17 @@ def serial_reader(ser, odom_pub, tf_broadcaster):
             if not line:
                 continue
 
+            if line == "O" or line == "<O>":
+                handle_feeder_ack()
+                continue
+
             parsed = parse_odo_packet(line)
             if parsed is None:
                 continue
 
             left, right = parsed
             print("[MEGA] <ODO,{},{:d}>".format(left, right))
-
             publish_odom(odom_pub, tf_broadcaster, left, right)
-
-            # IMPORTANT:
-            # do NOT rebroadcast odom to GUI
-            # broadcast_to_clients("<ODO,{},{:d}>".format(left, right))
 
         except Exception as e:
             print("[UART ERROR]", e)
@@ -364,13 +420,6 @@ def serial_reader(ser, odom_pub, tf_broadcaster):
 
 
 def extract_cmd_payload(msg):
-    """
-    Parse full commands like:
-      <CMD:F>
-      <CMD:S>
-      <CMD:AUTO>
-    Returns payload string or None
-    """
     if not msg.startswith("<CMD:") or not msg.endswith(">"):
         return None
 
@@ -382,10 +431,6 @@ def extract_cmd_payload(msg):
 
 
 def run_timed_motion(cmd, duration, resend_interval=0.10):
-    """
-    Re-send the command repeatedly for the duration.
-    Stop immediately if autonomous was cancelled or dog detected.
-    """
     global auto_cancel, dog_found
 
     end_time = time.time() + duration
@@ -424,19 +469,16 @@ def autonomous_sequence():
 
         print("[AUTO] Starting sequence")
 
-        # Step 1: forward 5 seconds
         print("[AUTO] Step 1: forward 5s")
         if not run_timed_motion("F", 5.0):
             print("[AUTO] Stopped during step 1")
             return
 
-        # Step 2: clockwise 90 deg (timed)
         print("[AUTO] Step 2: clockwise turn ~90 deg")
         if not run_timed_motion("D", AUTO_TURN_90_TIME):
             print("[AUTO] Stopped during step 2")
             return
 
-        # Step 3: forward 3 seconds
         print("[AUTO] Step 3: forward 3s")
         if not run_timed_motion("F", 3.0):
             print("[AUTO] Stopped during step 3")
@@ -451,13 +493,121 @@ def autonomous_sequence():
         auto_cancel = False
 
 
+def valid_feed_time_str(s):
+    try:
+        time.strptime(s, "%H:%M")
+        return True
+    except Exception:
+        return False
+
+
+def feed_cycle_worker(source_label):
+    global feed_running, last_feed_date
+
+    with feed_lock:
+        if feed_running:
+            print("[FEED] Feed already running")
+            broadcast_to_clients("<ERR:FEED_BUSY>")
+            return
+        feed_running = True
+
+    try:
+        print("[FEED] Feed cycle started:", source_label)
+        broadcast_to_clients("<EVENT:FEED_STARTED:{}>".format(source_label))
+
+        for i in range(10):
+            if rospy.is_shutdown():
+                break
+
+            step = i + 1
+            feed_ack_event.clear()
+
+            send_uart(ser_global, "<K>")
+            print("[FEED] Sent K step {}/10".format(step))
+            broadcast_to_clients("<EVENT:FEED_STEP:{}/10>".format(step))
+
+            # wait up to 7 seconds total between pulses
+            start_wait = time.time()
+            while (time.time() - start_wait) < 7.0 and not rospy.is_shutdown():
+                if feed_ack_event.is_set():
+                    break
+                time.sleep(0.05)
+
+            remaining = 7.0 - (time.time() - start_wait)
+            if remaining > 0:
+                time.sleep(remaining)
+
+        last_feed_date = today_date_str()
+        save_feed_config()
+
+        print("[FEED] Feed cycle done")
+        broadcast_to_clients("<EVENT:FEED_DONE>")
+
+    except Exception as e:
+        print("[FEED ERROR]", e)
+        broadcast_to_clients("<ERR:FEED_FAILED>")
+    finally:
+        with feed_lock:
+            feed_running = False
+
+
+def start_feed_cycle(source_label):
+    t = threading.Thread(target=feed_cycle_worker, args=(source_label,))
+    t.daemon = True
+    t.start()
+
+
+def scheduler_loop():
+    global last_feed_date
+
+    print("[SCHED] Scheduler started")
+
+    while not rospy.is_shutdown():
+        try:
+            now = datetime.now()
+            hm = now.strftime("%H:%M")
+            today = now.strftime("%Y-%m-%d")
+
+            if hm == feeding_time_str and last_feed_date != today:
+                print("[SCHED] Feeding time matched:", feeding_time_str)
+                start_feed_cycle("SCHEDULED")
+
+            time.sleep(1.0)
+
+        except Exception as e:
+            print("[SCHED ERROR]", e)
+            time.sleep(1.0)
+
+
+def time_broadcast_loop():
+    print("[TIME] Time broadcaster started")
+
+    while not rospy.is_shutdown():
+        try:
+            broadcast_time_status()
+            time.sleep(1.0)
+        except Exception as e:
+            print("[TIME ERROR]", e)
+            time.sleep(1.0)
+
+
+def send_initial_status(conn):
+    try:
+        conn.sendall(("<STATUS:TIME:{}>\n".format(now_time_str())).encode("ascii", "ignore"))
+        conn.sendall(("<STATUS:FEEDTIME:{}>\n".format(feeding_time_str)).encode("ascii", "ignore"))
+    except Exception as e:
+        print("[NET] Failed to send initial status:", e)
+
+
 def handle_client(conn, addr, ser):
-    global auto_cancel
+    global auto_cancel, feeding_time_str
 
     print("[NET] Client connected:", addr)
 
     with clients_lock:
         clients.append(conn)
+
+    send_initial_status(conn)
 
     try:
         while not rospy.is_shutdown():
@@ -476,11 +626,9 @@ def handle_client(conn, addr, ser):
                 conn.sendall("<ERR>\n".encode("ascii", "ignore"))
                 continue
 
-            # Keep old UI compatibility
             if cmd == "L":
                 cmd = "D"
 
-            # AUTO is handled here at bridge level
             if cmd == "AUTO":
                 print("[NET] Received mode command: AUTO")
                 auto_cancel = False
@@ -492,15 +640,41 @@ def handle_client(conn, addr, ser):
                 conn.sendall("<ACK:AUTO>\n".encode("ascii", "ignore"))
                 continue
 
-            # Any manual command cancels autonomous
+            if cmd == "FEEDNOW":
+                start_feed_cycle("MANUAL")
+                conn.sendall("<ACK:FEEDNOW>\n".encode("ascii", "ignore"))
+                continue
+
+            if cmd == "GETFEED":
+                conn.sendall(("<STATUS:FEEDTIME:{}>\n".format(feeding_time_str)).encode("ascii", "ignore"))
+                conn.sendall("<ACK:GETFEED>\n".encode("ascii", "ignore"))
+                continue
+
+            if cmd == "GETTIME":
+                conn.sendall(("<STATUS:TIME:{}>\n".format(now_time_str())).encode("ascii", "ignore"))
+                conn.sendall("<ACK:GETTIME>\n".encode("ascii", "ignore"))
+                continue
+
+            if cmd.startswith("SETFEED:"):
+                new_time = cmd.split("SETFEED:", 1)[1].strip()
+
+                if not valid_feed_time_str(new_time):
+                    conn.sendall("<ERR:BAD_FEEDTIME>\n".encode("ascii", "ignore"))
+                    continue
+
+                feeding_time_str = new_time
+                save_feed_config()
+                broadcast_feedtime_status()
+                conn.sendall(("<ACK:SETFEED:{}>\n".format(feeding_time_str)).encode("ascii", "ignore"))
+                continue
+
             if cmd in VALID_UART_COMMANDS:
                 auto_cancel = True
                 send_uart(ser, "<{}>".format(cmd))
                 conn.sendall("<ACK:{}>\n".format(cmd).encode("ascii", "ignore"))
-            elif cmd in VALID_WORD_COMMANDS:
-                conn.sendall("<ACK:{}>\n".format(cmd).encode("ascii", "ignore"))
-            else:
-                conn.sendall("<ERR>\n".encode("ascii", "ignore"))
+                continue
+
+            conn.sendall("<ERR>\n".encode("ascii", "ignore"))
 
     except Exception as e:
         print("[NET ERROR]", e)
@@ -522,6 +696,8 @@ def handle_client(conn, addr, ser):
 def main():
     rospy.init_node("jcserver_mapping_ros")
 
+    load_feed_config()
+
     odom_pub = rospy.Publisher("/odom", Odometry, queue_size=20)
     rospy.Subscriber("/cmd_vel", Twist, cmd_vel_callback, queue_size=10)
     rospy.Subscriber("/dog_detected", Bool, dog_detected_callback, queue_size=5)
@@ -537,12 +713,17 @@ def main():
 
     print("[UART] Opened", UART_DEV)
 
-    t1 = threading.Thread(
-        target=serial_reader,
-        args=(ser, odom_pub, tf_broadcaster)
-    )
+    t1 = threading.Thread(target=serial_reader, args=(ser, odom_pub, tf_broadcaster))
     t1.daemon = True
     t1.start()
+
+    t2 = threading.Thread(target=scheduler_loop)
+    t2.daemon = True
+    t2.start()
+
+    t3 = threading.Thread(target=time_broadcast_loop)
+    t3.daemon = True
+    t3.start()
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -550,6 +731,7 @@ def main():
     s.listen(5)
 
     print("[NET] Listening on", HOST, PORT)
+    print("[FEED] Current daily feed time =", feeding_time_str)
 
     while not rospy.is_shutdown():
         try:
@@ -558,12 +740,9 @@ def main():
             print("[NET ACCEPT ERROR]", e)
             continue
 
-        t2 = threading.Thread(
-            target=handle_client,
-            args=(conn, addr, ser)
-        )
-        t2.daemon = True
-        t2.start()
+        t = threading.Thread(target=handle_client, args=(conn, addr, ser))
+        t.daemon = True
+        t.start()
 
 
 if __name__ == "__main__":
