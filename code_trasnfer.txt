@@ -20,13 +20,13 @@ UART_BAUD = 9600
 HOST = "0.0.0.0"
 PORT = 5005
 
-# Single-char commands that really go to Arduino Mega
+# Single-character commands that go to Mega
 VALID_UART_COMMANDS = {"F", "R", "S", "C", "A", "D", "L", "K"}
 
-# Word commands that are for higher-level app logic only
+# Word commands handled at bridge level
 VALID_WORD_COMMANDS = {"AUTO"}
 
-# to tie cmd_vel (ROS velocity commands for auto navigation) to command sent to arduino mega
+# ===== cmd_vel -> Mega bridge =====
 cmd_vel_lock = threading.Lock()
 last_cmd_sent = "S"
 last_cmd_time = 0.0
@@ -36,6 +36,15 @@ CMD_DEADBAND_ANGULAR = 0.20
 CMD_REPEAT_INTERVAL = 0.2
 
 ser_global = None
+
+# ===== autonomous state =====
+auto_lock = threading.Lock()
+auto_running = False
+auto_cancel = False
+dog_found = False
+
+# Tune this for your robot for roughly 90 deg clockwise
+AUTO_TURN_90_TIME = 1.20
 
 # ===== ROBOT PARAMETERS =====
 WHEEL_DIAMETER_M = 0.065
@@ -99,24 +108,62 @@ def broadcast_to_clients(message):
                 pass
 
 
+def normalize_angle(a):
+    while a > math.pi:
+        a -= 2.0 * math.pi
+    while a < -math.pi:
+        a += 2.0 * math.pi
+    return a
+
+
+def clamp(val, lo, hi):
+    if val < lo:
+        return lo
+    if val > hi:
+        return hi
+    return val
+
+
+def send_uart(ser, msg):
+    with ser_lock:
+        ser.write((msg + "\n").encode("ascii", "ignore"))
+
+
+def stop_robot():
+    global last_cmd_sent, last_cmd_time
+
+    try:
+        if ser_global is not None:
+            send_uart(ser_global, "<S>")
+            with cmd_vel_lock:
+                last_cmd_sent = "S"
+                last_cmd_time = time.time()
+    except Exception as e:
+        print("[STOP ERROR]", e)
+
+
 def dog_detected_callback(msg):
+    global dog_found, auto_cancel
+
     if not msg.data:
         return
+
+    dog_found = True
+    auto_cancel = True
 
     print("[ROS] /dog_detected = True")
     broadcast_to_clients("<EVENT:DOG_DETECTED>")
 
-    # Optional safety stop to Mega when target found
-    try:
-        if ser_global is not None:
-            send_uart(ser_global, "<S>")
-            print("[ROS] Sent STOP to Mega due to dog detection")
-    except Exception as e:
-        print("[ROS ERROR] Failed to send STOP after dog detection:", e)
+    stop_robot()
 
 
 def cmd_vel_callback(msg):
-    global last_cmd_sent, last_cmd_time
+    global last_cmd_sent, last_cmd_time, auto_running
+
+    # Ignore /cmd_vel while timed AUTO routine is running
+    with auto_lock:
+        if auto_running:
+            return
 
     lin = msg.linear.x
     ang = msg.angular.z
@@ -146,27 +193,6 @@ def cmd_vel_callback(msg):
                 print("[CMD_VEL] lin={:.3f}, ang={:.3f} -> {}".format(lin, ang, cmd))
             except Exception as e:
                 print("[CMD_VEL ERROR]", e)
-
-
-def normalize_angle(a):
-    while a > math.pi:
-        a -= 2.0 * math.pi
-    while a < -math.pi:
-        a += 2.0 * math.pi
-    return a
-
-
-def clamp(val, lo, hi):
-    if val < lo:
-        return lo
-    if val > hi:
-        return hi
-    return val
-
-
-def send_uart(ser, msg):
-    with ser_lock:
-        ser.write((msg + "\n").encode("ascii", "ignore"))
 
 
 def parse_odo_packet(line):
@@ -329,8 +355,8 @@ def serial_reader(ser, odom_pub, tf_broadcaster):
             publish_odom(odom_pub, tf_broadcaster, left, right)
 
             # IMPORTANT:
-            # no longer rebroadcast odometry to GUI clients
-            # this avoids flooding the GUI system log
+            # do NOT rebroadcast odom to GUI
+            # broadcast_to_clients("<ODO,{},{:d}>".format(left, right))
 
         except Exception as e:
             print("[UART ERROR]", e)
@@ -355,7 +381,79 @@ def extract_cmd_payload(msg):
     return payload.upper()
 
 
+def run_timed_motion(cmd, duration, resend_interval=0.10):
+    """
+    Re-send the command repeatedly for the duration.
+    Stop immediately if autonomous was cancelled or dog detected.
+    """
+    global auto_cancel, dog_found
+
+    end_time = time.time() + duration
+
+    while time.time() < end_time and not rospy.is_shutdown():
+        if auto_cancel or dog_found:
+            stop_robot()
+            return False
+
+        try:
+            send_uart(ser_global, "<{}>".format(cmd))
+        except Exception as e:
+            print("[AUTO ERROR] Failed to send {}: {}".format(cmd, e))
+            stop_robot()
+            return False
+
+        time.sleep(resend_interval)
+
+    stop_robot()
+    time.sleep(0.15)
+    return True
+
+
+def autonomous_sequence():
+    global auto_running, auto_cancel, dog_found
+
+    with auto_lock:
+        if auto_running:
+            print("[AUTO] Already running")
+            return
+        auto_running = True
+
+    try:
+        auto_cancel = False
+        dog_found = False
+
+        print("[AUTO] Starting sequence")
+
+        # Step 1: forward 5 seconds
+        print("[AUTO] Step 1: forward 5s")
+        if not run_timed_motion("F", 5.0):
+            print("[AUTO] Stopped during step 1")
+            return
+
+        # Step 2: clockwise 90 deg (timed)
+        print("[AUTO] Step 2: clockwise turn ~90 deg")
+        if not run_timed_motion("D", AUTO_TURN_90_TIME):
+            print("[AUTO] Stopped during step 2")
+            return
+
+        # Step 3: forward 3 seconds
+        print("[AUTO] Step 3: forward 3s")
+        if not run_timed_motion("F", 3.0):
+            print("[AUTO] Stopped during step 3")
+            return
+
+        stop_robot()
+        print("[AUTO] Sequence complete")
+
+    finally:
+        with auto_lock:
+            auto_running = False
+        auto_cancel = False
+
+
 def handle_client(conn, addr, ser):
+    global auto_cancel
+
     print("[NET] Client connected:", addr)
 
     with clients_lock:
@@ -382,16 +480,25 @@ def handle_client(conn, addr, ser):
             if cmd == "L":
                 cmd = "D"
 
-            # Normal drive/feed commands go to Mega
+            # AUTO is handled here at bridge level
+            if cmd == "AUTO":
+                print("[NET] Received mode command: AUTO")
+                auto_cancel = False
+
+                t = threading.Thread(target=autonomous_sequence)
+                t.daemon = True
+                t.start()
+
+                conn.sendall("<ACK:AUTO>\n".encode("ascii", "ignore"))
+                continue
+
+            # Any manual command cancels autonomous
             if cmd in VALID_UART_COMMANDS:
+                auto_cancel = True
                 send_uart(ser, "<{}>".format(cmd))
                 conn.sendall("<ACK:{}>\n".format(cmd).encode("ascii", "ignore"))
-
-            # AUTO is acknowledged to GUI, but not forwarded to Mega here
             elif cmd in VALID_WORD_COMMANDS:
-                print("[NET] Received mode command:", cmd)
                 conn.sendall("<ACK:{}>\n".format(cmd).encode("ascii", "ignore"))
-
             else:
                 conn.sendall("<ERR>\n".encode("ascii", "ignore"))
 
@@ -399,10 +506,8 @@ def handle_client(conn, addr, ser):
         print("[NET ERROR]", e)
 
     finally:
-        try:
-            send_uart(ser, "<S>")
-        except Exception:
-            pass
+        auto_cancel = True
+        stop_robot()
 
         with clients_lock:
             try:
@@ -439,7 +544,6 @@ def main():
     t1.daemon = True
     t1.start()
 
-    s = socket.socket(socket.AF_INET, socket.SOL_SOCKET)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((HOST, PORT))
