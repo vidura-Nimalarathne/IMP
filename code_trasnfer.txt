@@ -4,42 +4,50 @@ import cv2
 import time
 import threading
 import subprocess
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse
 
+# ----------------------------
+# Basic settings
+# ----------------------------
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
-os.chdir("/home/vidura/jetson-inference/data")
-
-import jetson_inference
-import jetson_utils
-import numpy as np
 
 HOST = "0.0.0.0"
 PORT = 8080
 
 DEVICE = "/dev/video0"
 
-# Faster settings
-WIDTH = 320
-HEIGHT = 240
-FPS = 10
-JPEG_QUALITY = 45
+# Teleop view settings
+WIDTH = 640
+HEIGHT = 480
+FPS = 20
+JPEG_QUALITY = 75
 
+# AI settings
 DOG_ID = 18
 TEDDY_BEAR_ID = 88
 THRESHOLD = 0.5
 REQUIRED_CONSECUTIVE_FRAMES = 3
 TRIGGER_COOLDOWN = 5.0
 
-# Run AI only every N frames when autonomous detection is enabled
+# Run detection only every N captured frames when enabled
 DETECT_EVERY_N_FRAMES = 4
 
+# If True, grab a couple of frames before retrieve/read to flush stale camera buffer
+FLUSH_OLD_FRAMES = True
+FLUSH_GRABS = 2
+
+# ----------------------------
+# Globals
+# ----------------------------
 cap = None
 net = None
 
 frame_lock = threading.Lock()
 latest_jpg = None
+latest_frame_time = 0.0
 
 detect_enabled = False
 detect_count = 0
@@ -51,45 +59,97 @@ last_dog_present = False
 last_confirmed = False
 last_detections = []
 
+ai_ready = False
 
+# ----------------------------
+# Threaded HTTP server
+# ----------------------------
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
 
+# ----------------------------
+# ROS trigger
+# ----------------------------
 def publish_dog_detected():
     try:
-        subprocess.Popen([
-            "rostopic", "pub", "-1",
-            "/dog_detected",
-            "std_msgs/Bool",
-            "data: true"
-        ])
+        subprocess.Popen(
+            [
+                "rostopic", "pub", "-1",
+                "/dog_detected",
+                "std_msgs/Bool",
+                "data: true"
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
         print("[ROS] Published /dog_detected = True")
     except Exception as e:
         print("[ROS ERROR] Failed to publish /dog_detected = True: {}".format(e))
 
 
+# ----------------------------
+# Camera
+# ----------------------------
 def open_camera():
     global cap
 
     cap = cv2.VideoCapture(DEVICE)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open camera {}".format(DEVICE))
+
+    # Set MJPG first
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, FPS)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    if not cap.isOpened():
-        raise RuntimeError("Could not open camera {}".format(DEVICE))
+    # Try to reduce driver buffering
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
 
     print("[CAM] Opened {} ({}x{} @ {} FPS)".format(DEVICE, WIDTH, HEIGHT, FPS))
 
 
+def get_latest_camera_frame():
+    """
+    Try to get the freshest frame possible from the camera.
+    On some Jetson/OpenCV setups, repeated grab() helps flush stale buffered frames.
+    """
+    if FLUSH_OLD_FRAMES:
+        for _ in range(FLUSH_GRABS):
+            cap.grab()
+        ok, frame = cap.retrieve()
+        return ok, frame
+
+    return cap.read()
+
+
+# ----------------------------
+# AI
+# ----------------------------
 def init_ai():
-    global net
-    net = jetson_inference.detectNet("ssd-mobilenet-v2", threshold=THRESHOLD)
-    print("[AI] detectNet loaded")
+    global net, ai_ready
+
+    try:
+        os.chdir("/home/vidura/jetson-inference/data")
+
+        import jetson_inference
+        import jetson_utils
+
+        globals()["jetson_inference"] = jetson_inference
+        globals()["jetson_utils"] = jetson_utils
+
+        net = jetson_inference.detectNet("ssd-mobilenet-v2", threshold=THRESHOLD)
+        ai_ready = True
+        print("[AI] detectNet loaded")
+    except Exception as e:
+        ai_ready = False
+        net = None
+        print("[AI ERROR] Failed to load detectNet: {}".format(e))
 
 
 def set_detection(enabled):
@@ -110,7 +170,6 @@ def set_detection(enabled):
 
 def draw_box_and_label(frame, x1, y1, x2, y2, label):
     cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
     cv2.putText(
         frame,
         label,
@@ -123,20 +182,25 @@ def draw_box_and_label(frame, x1, y1, x2, y2, label):
     )
 
 
-def process_frame(frame_bgr):
+def process_frame_detection(frame_bgr):
+    """
+    Only used when detection is enabled.
+    Does lightweight overlay + periodic detectNet inference.
+    """
     global detect_count, already_triggered, last_trigger_time
     global frame_counter, last_dog_present, last_confirmed, last_detections
 
+    # Only copy when AI mode is on
     out = frame_bgr.copy()
 
-    if not detect_enabled:
+    if not ai_ready or net is None:
         cv2.putText(
             out,
-            "TELEOP VIEW",
+            "AI NOT READY",
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
-            (0, 255, 255),
+            (0, 0, 255),
             2,
             cv2.LINE_AA
         )
@@ -150,7 +214,6 @@ def process_frame(frame_bgr):
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             cuda_img = jetson_utils.cudaFromNumpy(frame_rgb)
 
-            # Simpler overlay workload: boxes only
             detections = net.Detect(cuda_img, overlay="none")
 
             dog_present = False
@@ -171,9 +234,7 @@ def process_frame(frame_bgr):
                     label = "{} {:.0f}%".format(net.GetClassDesc(cid), conf * 100.0)
                     new_boxes.append((x1, y1, x2, y2, label))
 
-                    print("[DETECT] {} {:.1f}%".format(
-                        net.GetClassDesc(cid), conf * 100.0
-                    ))
+                    print("[DETECT] {} {:.1f}%".format(net.GetClassDesc(cid), conf * 100.0))
 
             last_detections = new_boxes
             last_dog_present = dog_present
@@ -226,38 +287,55 @@ def process_frame(frame_bgr):
     return out
 
 
+# ----------------------------
+# Capture loop
+# ----------------------------
 def capture_loop():
-    global latest_jpg
+    """
+    Continuously chase the freshest frame.
+    No FPS sleep here. This is the main fix for latency.
+    """
+    global latest_jpg, latest_frame_time
 
-    frame_period = 1.0 / max(FPS, 1)
+    consecutive_failures = 0
 
     while True:
-        start_time = time.time()
+        ok, frame = get_latest_camera_frame()
 
-        ok, frame = cap.read()
         if not ok or frame is None:
-            time.sleep(0.02)
+            consecutive_failures += 1
+            if consecutive_failures > 20:
+                print("[CAM] Warning: repeated frame read failures")
+                consecutive_failures = 0
+            time.sleep(0.005)
             continue
 
-        processed = process_frame(frame)
+        consecutive_failures = 0
+
+        # Very important:
+        # when detect is OFF, do not copy the frame and do not overlay anything
+        if detect_enabled:
+            processed = process_frame_detection(frame)
+        else:
+            processed = frame
 
         ok, jpg = cv2.imencode(
             ".jpg",
             processed,
-            [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY],
+            [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
         )
+
         if not ok:
             continue
 
         with frame_lock:
             latest_jpg = jpg.tobytes()
-
-        elapsed = time.time() - start_time
-        sleep_time = frame_period - elapsed
-        if sleep_time > 0:
-            time.sleep(sleep_time)
+            latest_frame_time = time.time()
 
 
+# ----------------------------
+# HTTP handler
+# ----------------------------
 class MJPEGHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -272,7 +350,15 @@ class MJPEGHandler(BaseHTTPRequestHandler):
             set_detection(False)
             self.send_text("DETECTION OFF\n")
         elif path == "/status":
-            self.send_text("detect_enabled={}\n".format(detect_enabled))
+            age = time.time() - latest_frame_time if latest_frame_time else -1
+            status = (
+                "detect_enabled={}\n"
+                "ai_ready={}\n"
+                "frame_age_sec={:.3f}\n"
+                "resolution={}x{}\n"
+                "fps={}\n"
+            ).format(detect_enabled, ai_ready, age, WIDTH, HEIGHT, FPS)
+            self.send_text(status)
         else:
             self.send_error(404)
 
@@ -283,13 +369,21 @@ class MJPEGHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.end_headers()
 
+        last_sent = 0.0
+        frame_interval = 1.0 / max(FPS, 1)
+
         try:
             while True:
                 with frame_lock:
                     data = latest_jpg
 
                 if data is None:
-                    time.sleep(0.02)
+                    time.sleep(0.01)
+                    continue
+
+                now = time.time()
+                if (now - last_sent) < frame_interval:
+                    time.sleep(0.001)
                     continue
 
                 self.wfile.write(b"--frame\r\n")
@@ -298,7 +392,7 @@ class MJPEGHandler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 self.wfile.write(b"\r\n")
 
-                time.sleep(1.0 / max(FPS, 1))
+                last_sent = now
 
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -317,21 +411,24 @@ class MJPEGHandler(BaseHTTPRequestHandler):
         return
 
 
+# ----------------------------
+# Main
+# ----------------------------
 def main():
     open_camera()
     init_ai()
     set_detection(False)
 
-    t = threading.Thread(target=capture_loop)
-    t.daemon = True
+    t = threading.Thread(target=capture_loop, daemon=True)
     t.start()
 
-    print("[MJPEG] Stream: http://{}:{}/stream.mjpg".format(HOST, PORT))
-    print("[CTRL ] ON : http://{}:{}/detect_on".format(HOST, PORT))
-    print("[CTRL ] OFF: http://{}:{}/detect_off".format(HOST, PORT))
-    print("[STAT ] URL: http://{}:{}/status".format(HOST, PORT))
+    print("[MJPEG] Stream:  http://{}:{}/stream.mjpg".format(HOST, PORT))
+    print("[CTRL ] ON:     http://{}:{}/detect_on".format(HOST, PORT))
+    print("[CTRL ] OFF:    http://{}:{}/detect_off".format(HOST, PORT))
+    print("[STAT ] Status: http://{}:{}/status".format(HOST, PORT))
 
     server = ThreadedHTTPServer((HOST, PORT), MJPEGHandler)
+
     try:
         server.serve_forever()
     finally:
