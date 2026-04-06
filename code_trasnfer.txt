@@ -19,16 +19,21 @@ HOST = "0.0.0.0"
 PORT = 8080
 
 DEVICE = "/dev/video0"
-WIDTH = 640
-HEIGHT = 480
-FPS = 20
-JPEG_QUALITY = 80
+
+# Faster settings
+WIDTH = 320
+HEIGHT = 240
+FPS = 10
+JPEG_QUALITY = 45
 
 DOG_ID = 18
 TEDDY_BEAR_ID = 88
 THRESHOLD = 0.5
 REQUIRED_CONSECUTIVE_FRAMES = 3
 TRIGGER_COOLDOWN = 5.0
+
+# Run AI only every N frames when autonomous detection is enabled
+DETECT_EVERY_N_FRAMES = 4
 
 cap = None
 net = None
@@ -40,6 +45,11 @@ detect_enabled = False
 detect_count = 0
 already_triggered = False
 last_trigger_time = 0.0
+
+frame_counter = 0
+last_dog_present = False
+last_confirmed = False
+last_detections = []
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
@@ -68,6 +78,7 @@ def open_camera():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, FPS)
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     if not cap.isOpened():
         raise RuntimeError("Could not open camera {}".format(DEVICE))
@@ -83,120 +94,146 @@ def init_ai():
 
 def set_detection(enabled):
     global detect_enabled, detect_count, already_triggered, last_trigger_time
+    global frame_counter, last_dog_present, last_confirmed, last_detections
+
     detect_enabled = enabled
     detect_count = 0
     already_triggered = False
     last_trigger_time = 0.0
+    frame_counter = 0
+    last_dog_present = False
+    last_confirmed = False
+    last_detections = []
+
     print("[AI] Detection {}".format("ENABLED" if enabled else "DISABLED"))
+
+
+def draw_box_and_label(frame, x1, y1, x2, y2, label):
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+    cv2.putText(
+        frame,
+        label,
+        (x1, max(20, y1 - 8)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (0, 255, 0),
+        2,
+        cv2.LINE_AA
+    )
 
 
 def process_frame(frame_bgr):
     global detect_count, already_triggered, last_trigger_time
+    global frame_counter, last_dog_present, last_confirmed, last_detections
+
+    out = frame_bgr.copy()
 
     if not detect_enabled:
-        out = frame_bgr.copy()
         cv2.putText(
             out,
             "TELEOP VIEW",
-            (10, 30),
+            (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
+            0.7,
             (0, 255, 255),
             2,
             cv2.LINE_AA
         )
         return out
 
-    # OpenCV BGR -> RGB for jetson_utils
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    frame_counter += 1
+    run_detection = (frame_counter % DETECT_EVERY_N_FRAMES == 0)
 
-    try:
-        cuda_img = jetson_utils.cudaFromNumpy(frame_rgb)
-        detections = net.Detect(cuda_img, overlay="box,labels,conf")
+    if run_detection:
+        try:
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            cuda_img = jetson_utils.cudaFromNumpy(frame_rgb)
 
-        dog_present = False
-        for d in detections:
-            cid = int(d.ClassID)
-            conf = float(d.Confidence)
+            # Simpler overlay workload: boxes only
+            detections = net.Detect(cuda_img, overlay="none")
 
-            if cid in (DOG_ID, TEDDY_BEAR_ID) and conf >= THRESHOLD:
-                dog_present = True
-                print("[DETECT] {} {:.1f}%".format(
-                    net.GetClassDesc(cid), conf * 100.0
-                ))
+            dog_present = False
+            new_boxes = []
 
-        if dog_present:
-            detect_count += 1
-        else:
-            detect_count = 0
-            already_triggered = False
+            for d in detections:
+                cid = int(d.ClassID)
+                conf = float(d.Confidence)
 
-        confirmed = detect_count >= REQUIRED_CONSECUTIVE_FRAMES
+                if cid in (DOG_ID, TEDDY_BEAR_ID) and conf >= THRESHOLD:
+                    dog_present = True
 
-        now = time.time()
-        if confirmed and (not already_triggered) and ((now - last_trigger_time) > TRIGGER_COOLDOWN):
-            publish_dog_detected()
-            already_triggered = True
-            last_trigger_time = now
+                    x1 = int(d.Left)
+                    y1 = int(d.Top)
+                    x2 = int(d.Right)
+                    y2 = int(d.Bottom)
 
-        # CUDA RGB -> numpy RGB -> BGR for OpenCV/MJPEG
-        out_rgb = jetson_utils.cudaToNumpy(cuda_img)
-        out_rgb = np.asarray(out_rgb)
-        out_bgr = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
+                    label = "{} {:.0f}%".format(net.GetClassDesc(cid), conf * 100.0)
+                    new_boxes.append((x1, y1, x2, y2, label))
 
-        cv2.putText(
-            out_bgr,
-            "AUTONOMOUS DETECTION ACTIVE",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA
-        )
-        cv2.putText(
-            out_bgr,
-            "dog_present={} confirmed={} count={}".format(dog_present, confirmed, detect_count),
-            (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA
-        )
+                    print("[DETECT] {} {:.1f}%".format(
+                        net.GetClassDesc(cid), conf * 100.0
+                    ))
 
-        return out_bgr
+            last_detections = new_boxes
+            last_dog_present = dog_present
 
-    except Exception as e:
-        out = frame_bgr.copy()
-        cv2.putText(
-            out,
-            "AI ERROR",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 0, 255),
-            2,
-            cv2.LINE_AA
-        )
-        cv2.putText(
-            out,
-            str(e)[:80],
-            (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (0, 0, 255),
-            1,
-            cv2.LINE_AA
-        )
-        print("[AI ERROR] {}".format(e))
-        return out
+            if dog_present:
+                detect_count += 1
+            else:
+                detect_count = 0
+                already_triggered = False
+
+            confirmed = detect_count >= REQUIRED_CONSECUTIVE_FRAMES
+            last_confirmed = confirmed
+
+            now = time.time()
+            if confirmed and (not already_triggered) and ((now - last_trigger_time) > TRIGGER_COOLDOWN):
+                publish_dog_detected()
+                already_triggered = True
+                last_trigger_time = now
+
+        except Exception as e:
+            print("[AI ERROR] {}".format(e))
+
+    for box in last_detections:
+        draw_box_and_label(out, box[0], box[1], box[2], box[3], box[4])
+
+    cv2.putText(
+        out,
+        "AUTONOMOUS DETECTION ACTIVE",
+        (10, 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (0, 255, 0),
+        2,
+        cv2.LINE_AA
+    )
+
+    cv2.putText(
+        out,
+        "dog={} confirmed={} count={} ai_every={}f".format(
+            last_dog_present, last_confirmed, detect_count, DETECT_EVERY_N_FRAMES
+        ),
+        (10, 48),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.42,
+        (0, 255, 0),
+        1,
+        cv2.LINE_AA
+    )
+
+    return out
 
 
 def capture_loop():
     global latest_jpg
 
+    frame_period = 1.0 / max(FPS, 1)
+
     while True:
+        start_time = time.time()
+
         ok, frame = cap.read()
         if not ok or frame is None:
             time.sleep(0.02)
@@ -215,7 +252,10 @@ def capture_loop():
         with frame_lock:
             latest_jpg = jpg.tobytes()
 
-        time.sleep(1.0 / max(FPS, 1))
+        elapsed = time.time() - start_time
+        sleep_time = frame_period - elapsed
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
 
 class MJPEGHandler(BaseHTTPRequestHandler):
