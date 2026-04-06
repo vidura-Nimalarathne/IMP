@@ -1,4 +1,303 @@
-source /opt/ros/melodic/setup.bash
-source ~/catkin_ws/devel/setup.bash
-export PYTHONPATH=$PYTHONPATH:/home/vidura/jetson-inference/python/python:/home/vidura/jetson-inference/build/aarch64/lib/python/3.6:/home/vidura/jetson-inference/utils/python/python
-python3 ~/catkin_ws/src/robot_nav/scripts/dog_mjpeg_server.py
+#!/usr/bin/env python3
+import os
+import cv2
+import time
+import threading
+import subprocess
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+from urllib.parse import urlparse
+
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
+os.chdir("/home/vidura/jetson-inference/data")
+
+import jetson_inference
+import jetson_utils
+import numpy as np
+
+HOST = "0.0.0.0"
+PORT = 8080
+
+DEVICE = "/dev/video0"
+WIDTH = 640
+HEIGHT = 480
+FPS = 20
+JPEG_QUALITY = 80
+
+DOG_ID = 18
+TEDDY_BEAR_ID = 88
+THRESHOLD = 0.5
+REQUIRED_CONSECUTIVE_FRAMES = 3
+TRIGGER_COOLDOWN = 5.0
+
+cap = None
+net = None
+
+frame_lock = threading.Lock()
+latest_jpg = None
+
+detect_enabled = False
+detect_count = 0
+already_triggered = False
+last_trigger_time = 0.0
+
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def publish_dog_detected():
+    try:
+        subprocess.Popen([
+            "rostopic", "pub", "-1",
+            "/dog_detected",
+            "std_msgs/Bool",
+            "data: true"
+        ])
+        print("[ROS] Published /dog_detected = True")
+    except Exception as e:
+        print("[ROS ERROR] Failed to publish /dog_detected = True: {}".format(e))
+
+
+def open_camera():
+    global cap
+
+    cap = cv2.VideoCapture(DEVICE)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
+    cap.set(cv2.CAP_PROP_FPS, FPS)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
+    if not cap.isOpened():
+        raise RuntimeError("Could not open camera {}".format(DEVICE))
+
+    print("[CAM] Opened {} ({}x{} @ {} FPS)".format(DEVICE, WIDTH, HEIGHT, FPS))
+
+
+def init_ai():
+    global net
+    net = jetson_inference.detectNet("ssd-mobilenet-v2", threshold=THRESHOLD)
+    print("[AI] detectNet loaded")
+
+
+def set_detection(enabled):
+    global detect_enabled, detect_count, already_triggered, last_trigger_time
+    detect_enabled = enabled
+    detect_count = 0
+    already_triggered = False
+    last_trigger_time = 0.0
+    print("[AI] Detection {}".format("ENABLED" if enabled else "DISABLED"))
+
+
+def process_frame(frame_bgr):
+    global detect_count, already_triggered, last_trigger_time
+
+    if not detect_enabled:
+        out = frame_bgr.copy()
+        cv2.putText(
+            out,
+            "TELEOP VIEW",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+        return out
+
+    # OpenCV BGR -> RGB for jetson_utils
+    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+    try:
+        cuda_img = jetson_utils.cudaFromNumpy(frame_rgb)
+        detections = net.Detect(cuda_img, overlay="box,labels,conf")
+
+        dog_present = False
+        for d in detections:
+            cid = int(d.ClassID)
+            conf = float(d.Confidence)
+
+            if cid in (DOG_ID, TEDDY_BEAR_ID) and conf >= THRESHOLD:
+                dog_present = True
+                print("[DETECT] {} {:.1f}%".format(
+                    net.GetClassDesc(cid), conf * 100.0
+                ))
+
+        if dog_present:
+            detect_count += 1
+        else:
+            detect_count = 0
+            already_triggered = False
+
+        confirmed = detect_count >= REQUIRED_CONSECUTIVE_FRAMES
+
+        now = time.time()
+        if confirmed and (not already_triggered) and ((now - last_trigger_time) > TRIGGER_COOLDOWN):
+            publish_dog_detected()
+            already_triggered = True
+            last_trigger_time = now
+
+        # CUDA RGB -> numpy RGB -> BGR for OpenCV/MJPEG
+        out_rgb = jetson_utils.cudaToNumpy(cuda_img)
+        out_rgb = np.asarray(out_rgb)
+        out_bgr = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
+
+        cv2.putText(
+            out_bgr,
+            "AUTONOMOUS DETECTION ACTIVE",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA
+        )
+        cv2.putText(
+            out_bgr,
+            "dog_present={} confirmed={} count={}".format(dog_present, confirmed, detect_count),
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA
+        )
+
+        return out_bgr
+
+    except Exception as e:
+        out = frame_bgr.copy()
+        cv2.putText(
+            out,
+            "AI ERROR",
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA
+        )
+        cv2.putText(
+            out,
+            str(e)[:80],
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 0, 255),
+            1,
+            cv2.LINE_AA
+        )
+        print("[AI ERROR] {}".format(e))
+        return out
+
+
+def capture_loop():
+    global latest_jpg
+
+    while True:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            time.sleep(0.02)
+            continue
+
+        processed = process_frame(frame)
+
+        ok, jpg = cv2.imencode(
+            ".jpg",
+            processed,
+            [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY],
+        )
+        if not ok:
+            continue
+
+        with frame_lock:
+            latest_jpg = jpg.tobytes()
+
+        time.sleep(1.0 / max(FPS, 1))
+
+
+class MJPEGHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path in ("/", "/stream.mjpg"):
+            self.handle_stream()
+        elif path == "/detect_on":
+            set_detection(True)
+            self.send_text("DETECTION ON\n")
+        elif path == "/detect_off":
+            set_detection(False)
+            self.send_text("DETECTION OFF\n")
+        elif path == "/status":
+            self.send_text("detect_enabled={}\n".format(detect_enabled))
+        else:
+            self.send_error(404)
+
+    def handle_stream(self):
+        self.send_response(200)
+        self.send_header("Cache-Control", "no-cache, private")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.end_headers()
+
+        try:
+            while True:
+                with frame_lock:
+                    data = latest_jpg
+
+                if data is None:
+                    time.sleep(0.02)
+                    continue
+
+                self.wfile.write(b"--frame\r\n")
+                self.wfile.write(b"Content-Type: image/jpeg\r\n")
+                self.wfile.write(("Content-Length: %d\r\n\r\n" % len(data)).encode("utf-8"))
+                self.wfile.write(data)
+                self.wfile.write(b"\r\n")
+
+                time.sleep(1.0 / max(FPS, 1))
+
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:
+            pass
+
+    def send_text(self, text):
+        data = text.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format, *args):
+        return
+
+
+def main():
+    open_camera()
+    init_ai()
+    set_detection(False)
+
+    t = threading.Thread(target=capture_loop)
+    t.daemon = True
+    t.start()
+
+    print("[MJPEG] Stream: http://{}:{}/stream.mjpg".format(HOST, PORT))
+    print("[CTRL ] ON : http://{}:{}/detect_on".format(HOST, PORT))
+    print("[CTRL ] OFF: http://{}:{}/detect_off".format(HOST, PORT))
+    print("[STAT ] URL: http://{}:{}/status".format(HOST, PORT))
+
+    server = ThreadedHTTPServer((HOST, PORT), MJPEGHandler)
+    try:
+        server.serve_forever()
+    finally:
+        if cap is not None:
+            cap.release()
+
+
+if __name__ == "__main__":
+    main()
