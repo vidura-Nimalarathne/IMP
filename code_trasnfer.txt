@@ -9,9 +9,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from urllib.parse import urlparse
 
-# ----------------------------
-# Basic settings
-# ----------------------------
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 
 HOST = "0.0.0.0"
@@ -19,31 +16,27 @@ PORT = 8080
 
 DEVICE = "/dev/video0"
 
-# Teleop view settings
-WIDTH = 640
-HEIGHT = 480
-FPS = 20
-JPEG_QUALITY = 75
+# Current working video settings
+WIDTH = 480
+HEIGHT = 360
+FPS = 15
+JPEG_QUALITY = 70
 
 # AI settings
 DOG_ID = 18
 TEDDY_BEAR_ID = 88
-THRESHOLD = 0.5
-REQUIRED_CONSECUTIVE_FRAMES = 3
+THRESHOLD = 0.35
+REQUIRED_CONSECUTIVE_FRAMES = 2
 TRIGGER_COOLDOWN = 5.0
+DETECT_EVERY_N_FRAMES = 2
 
-# Run detection only every N captured frames when enabled
-DETECT_EVERY_N_FRAMES = 4
-
-# If True, grab a couple of frames before retrieve/read to flush stale camera buffer
 FLUSH_OLD_FRAMES = True
-FLUSH_GRABS = 2
+FLUSH_GRABS = 4
 
-# ----------------------------
-# Globals
-# ----------------------------
 cap = None
 net = None
+jetson_inference = None
+jetson_utils = None
 
 frame_lock = threading.Lock()
 latest_jpg = None
@@ -60,18 +53,15 @@ last_confirmed = False
 last_detections = []
 
 ai_ready = False
+last_ai_error = ""
+last_detect_label = "none"
 
-# ----------------------------
-# Threaded HTTP server
-# ----------------------------
+
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
 
-# ----------------------------
-# ROS trigger
-# ----------------------------
 def publish_dog_detected():
     try:
         subprocess.Popen(
@@ -89,9 +79,6 @@ def publish_dog_detected():
         print("[ROS ERROR] Failed to publish /dog_detected = True: {}".format(e))
 
 
-# ----------------------------
-# Camera
-# ----------------------------
 def open_camera():
     global cap
 
@@ -99,13 +86,11 @@ def open_camera():
     if not cap.isOpened():
         raise RuntimeError("Could not open camera {}".format(DEVICE))
 
-    # Set MJPG first
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
     cap.set(cv2.CAP_PROP_FPS, FPS)
 
-    # Try to reduce driver buffering
     try:
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception:
@@ -115,10 +100,6 @@ def open_camera():
 
 
 def get_latest_camera_frame():
-    """
-    Try to get the freshest frame possible from the camera.
-    On some Jetson/OpenCV setups, repeated grab() helps flush stale buffered frames.
-    """
     if FLUSH_OLD_FRAMES:
         for _ in range(FLUSH_GRABS):
             cap.grab()
@@ -128,33 +109,33 @@ def get_latest_camera_frame():
     return cap.read()
 
 
-# ----------------------------
-# AI
-# ----------------------------
 def init_ai():
-    global net, ai_ready
+    global net, ai_ready, last_ai_error
+    global jetson_inference, jetson_utils
 
     try:
         os.chdir("/home/vidura/jetson-inference/data")
 
-        import jetson_inference
-        import jetson_utils
+        import jetson_inference as ji
+        import jetson_utils as ju
 
-        globals()["jetson_inference"] = jetson_inference
-        globals()["jetson_utils"] = jetson_utils
+        jetson_inference = ji
+        jetson_utils = ju
 
         net = jetson_inference.detectNet("ssd-mobilenet-v2", threshold=THRESHOLD)
         ai_ready = True
-        print("[AI] detectNet loaded")
+        last_ai_error = ""
+        print("[AI] detectNet loaded successfully")
     except Exception as e:
         ai_ready = False
         net = None
+        last_ai_error = str(e)
         print("[AI ERROR] Failed to load detectNet: {}".format(e))
 
 
 def set_detection(enabled):
     global detect_enabled, detect_count, already_triggered, last_trigger_time
-    global frame_counter, last_dog_present, last_confirmed, last_detections
+    global frame_counter, last_dog_present, last_confirmed, last_detections, last_detect_label
 
     detect_enabled = enabled
     detect_count = 0
@@ -164,42 +145,73 @@ def set_detection(enabled):
     last_dog_present = False
     last_confirmed = False
     last_detections = []
+    last_detect_label = "none"
 
     print("[AI] Detection {}".format("ENABLED" if enabled else "DISABLED"))
 
 
-def draw_box_and_label(frame, x1, y1, x2, y2, label):
-    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+def draw_box_and_label(frame, x1, y1, x2, y2, label, color=(0, 255, 0)):
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
     cv2.putText(
         frame,
         label,
         (x1, max(20, y1 - 8)),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.5,
-        (0, 255, 0),
+        color,
         2,
         cv2.LINE_AA
     )
 
 
-def process_frame_detection(frame_bgr):
-    """
-    Only used when detection is enabled.
-    Does lightweight overlay + periodic detectNet inference.
-    """
+def process_frame(frame_bgr):
     global detect_count, already_triggered, last_trigger_time
-    global frame_counter, last_dog_present, last_confirmed, last_detections
+    global frame_counter, last_dog_present, last_confirmed, last_detections, last_detect_label
 
-    # Only copy when AI mode is on
+    if not detect_enabled:
+        out = frame_bgr.copy()
+        cv2.putText(
+            out,
+            "AI MODE: OFF",
+            (10, 25),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+        cv2.putText(
+            out,
+            "TELEOP VIEW",
+            (10, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+        return out
+
     out = frame_bgr.copy()
+
+    cv2.putText(
+        out,
+        "AI MODE: ON",
+        (10, 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 0),
+        2,
+        cv2.LINE_AA
+    )
 
     if not ai_ready or net is None:
         cv2.putText(
             out,
             "AI NOT READY",
-            (10, 25),
+            (10, 50),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
+            0.65,
             (0, 0, 255),
             2,
             cv2.LINE_AA
@@ -208,6 +220,17 @@ def process_frame_detection(frame_bgr):
 
     frame_counter += 1
     run_detection = (frame_counter % DETECT_EVERY_N_FRAMES == 0)
+
+    cv2.putText(
+        out,
+        "AUTONOMOUS DETECTION ACTIVE",
+        (10, 50),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (0, 255, 0),
+        2,
+        cv2.LINE_AA
+    )
 
     if run_detection:
         try:
@@ -218,26 +241,30 @@ def process_frame_detection(frame_bgr):
 
             dog_present = False
             new_boxes = []
+            current_label = "none"
 
             for d in detections:
                 cid = int(d.ClassID)
                 conf = float(d.Confidence)
+                class_name = net.GetClassDesc(cid)
+
+                print("[AI] Saw class={} conf={:.2f}".format(class_name, conf))
 
                 if cid in (DOG_ID, TEDDY_BEAR_ID) and conf >= THRESHOLD:
                     dog_present = True
+                    current_label = "{} {:.0f}%".format(class_name, conf * 100.0)
 
                     x1 = int(d.Left)
                     y1 = int(d.Top)
                     x2 = int(d.Right)
                     y2 = int(d.Bottom)
 
-                    label = "{} {:.0f}%".format(net.GetClassDesc(cid), conf * 100.0)
-                    new_boxes.append((x1, y1, x2, y2, label))
-
-                    print("[DETECT] {} {:.1f}%".format(net.GetClassDesc(cid), conf * 100.0))
+                    new_boxes.append((x1, y1, x2, y2, current_label))
+                    print("[DETECT] TARGET {} {:.1f}%".format(class_name, conf * 100.0))
 
             last_detections = new_boxes
             last_dog_present = dog_present
+            last_detect_label = current_label
 
             if dog_present:
                 detect_count += 1
@@ -258,25 +285,14 @@ def process_frame_detection(frame_bgr):
             print("[AI ERROR] {}".format(e))
 
     for box in last_detections:
-        draw_box_and_label(out, box[0], box[1], box[2], box[3], box[4])
+        draw_box_and_label(out, box[0], box[1], box[2], box[3], box[4], (0, 255, 0))
 
     cv2.putText(
         out,
-        "AUTONOMOUS DETECTION ACTIVE",
-        (10, 25),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (0, 255, 0),
-        2,
-        cv2.LINE_AA
-    )
-
-    cv2.putText(
-        out,
-        "dog={} confirmed={} count={} ai_every={}f".format(
-            last_dog_present, last_confirmed, detect_count, DETECT_EVERY_N_FRAMES
+        "target={} dog={} confirmed={} count={}".format(
+            last_detect_label, last_dog_present, last_confirmed, detect_count
         ),
-        (10, 48),
+        (10, 75),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.42,
         (0, 255, 0),
@@ -287,44 +303,23 @@ def process_frame_detection(frame_bgr):
     return out
 
 
-# ----------------------------
-# Capture loop
-# ----------------------------
 def capture_loop():
-    """
-    Continuously chase the freshest frame.
-    No FPS sleep here. This is the main fix for latency.
-    """
     global latest_jpg, latest_frame_time
-
-    consecutive_failures = 0
 
     while True:
         ok, frame = get_latest_camera_frame()
 
         if not ok or frame is None:
-            consecutive_failures += 1
-            if consecutive_failures > 20:
-                print("[CAM] Warning: repeated frame read failures")
-                consecutive_failures = 0
             time.sleep(0.005)
             continue
 
-        consecutive_failures = 0
-
-        # Very important:
-        # when detect is OFF, do not copy the frame and do not overlay anything
-        if detect_enabled:
-            processed = process_frame_detection(frame)
-        else:
-            processed = frame
+        processed = process_frame(frame)
 
         ok, jpg = cv2.imencode(
             ".jpg",
             processed,
             [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY]
         )
-
         if not ok:
             continue
 
@@ -333,9 +328,6 @@ def capture_loop():
             latest_frame_time = time.time()
 
 
-# ----------------------------
-# HTTP handler
-# ----------------------------
 class MJPEGHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -354,10 +346,25 @@ class MJPEGHandler(BaseHTTPRequestHandler):
             status = (
                 "detect_enabled={}\n"
                 "ai_ready={}\n"
+                "last_ai_error={}\n"
                 "frame_age_sec={:.3f}\n"
                 "resolution={}x{}\n"
                 "fps={}\n"
-            ).format(detect_enabled, ai_ready, age, WIDTH, HEIGHT, FPS)
+                "threshold={}\n"
+                "detect_every_n_frames={}\n"
+                "last_detect_label={}\n"
+            ).format(
+                detect_enabled,
+                ai_ready,
+                last_ai_error,
+                age,
+                WIDTH,
+                HEIGHT,
+                FPS,
+                THRESHOLD,
+                DETECT_EVERY_N_FRAMES,
+                last_detect_label
+            )
             self.send_text(status)
         else:
             self.send_error(404)
@@ -411,9 +418,6 @@ class MJPEGHandler(BaseHTTPRequestHandler):
         return
 
 
-# ----------------------------
-# Main
-# ----------------------------
 def main():
     open_camera()
     init_ai()
