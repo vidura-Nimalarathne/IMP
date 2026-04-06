@@ -1,17 +1,74 @@
-[ WARN] [1775455012.829120232]: Clearing both costmaps to unstuck robot (1.84m).
-[ WARN] [1775455016.329110627]: Rotate recovery behavior started.
-[ERROR] [1775455016.329430373]: Rotate recovery can't rotate in place because there is a potential collision. Cost: -1.00
-[ERROR] [1775455019.829071740]: Aborting because a valid plan could not be found. Even after executing all recovery behaviors
-[ WARN] [1775455284.536565014]: Clearing both costmaps to unstuck robot (3.00m).
-[ WARN] [1775455288.036561618]: Rotate recovery behavior started.
-[ERROR] [1775455288.037085125]: Rotate recovery can't rotate in place because there is a potential collision. Cost: -1.00
-[ WARN] [1775455291.536549216]: Clearing both costmaps to unstuck robot (1.84m).
-[ WARN] [1775455295.036553029]: Rotate recovery behavior started.
-[ERROR] [1775455295.037810155]: Rotate recovery can't rotate in place because there is a potential collision. Cost: -1.00
-[ERROR] [1775455298.536642166]: Aborting because a valid plan could not be found. Even after executing all recovery behaviors
-[ WARN] [1775455303.053885650]: Clearing both costmaps to unstuck robot (3.00m).
-[ WARN] [1775455306.553833116]: Rotate recovery behavior started.
-[ERROR] [1775455306.554118750]: Rotate recovery can't rotate in place because there is a potential collision. Cost: -1.00
-[ WARN] [1775455310.053884985]: Clearing both costmaps to unstuck robot (1.84m).
-[ WARN] [1775455313.553875776]: Rotate recovery behavior started.
-[ERROR] [1775455313.554986959]: Rotate recovery can't rotate in place because there is a potential collision. Cost: -1.00
+costmap_common_params.yaml
+
+obstacle_range: 2.5
+raytrace_range: 3.0
+
+footprint: [[0.18, 0.13], [0.18, -0.13], [-0.18, -0.13], [-0.18, 0.13]]
+
+inflation_radius: 0.10
+cost_scaling_factor: 10.0
+
+map_type: costmap
+
+observation_sources: laser_scan_sensor
+laser_scan_sensor:
+  sensor_frame: laser
+  data_type: LaserScan
+  topic: /scan
+  marking: true
+  clearing: true
+
+dwa_local_planner_params.yaml
+
+DWAPlannerROS:
+  max_vel_x: 0.15
+  min_vel_x: 0.05
+
+  max_vel_theta: 0.5
+  min_vel_theta: 0.15
+  min_in_place_vel_theta: 0.15
+
+  acc_lim_x: 0.4
+  acc_lim_theta: 0.6
+
+  xy_goal_tolerance: 0.12
+  yaw_goal_tolerance: 0.25
+  latch_xy_goal_tolerance: false
+
+  sim_time: 1.0
+  vx_samples: 8
+  vtheta_samples: 12
+
+  path_distance_bias: 24.0
+  goal_distance_bias: 18.0
+  occdist_scale: 0.02
+
+  forward_point_distance: 0.15
+  stop_time_buffer: 0.2
+  scaling_speed: 0.2
+  max_scaling_factor: 0.15
+
+global_costmap_params.yaml
+
+global_costmap:
+  global_frame: map
+  robot_base_frame: base_link
+  update_frequency: 2.0
+  publish_frequency: 1.0
+  static_map: true
+  transform_tolerance: 1.0
+  oscillation_reset_dist: 0.01
+
+local_costmap_params.yaml
+
+local_costmap:
+  global_frame: odom
+  robot_base_frame: base_link
+  update_frequency: 5.0
+  publish_frequency: 2.0
+  static_map: false
+  rolling_window: true
+  width: 3.0
+  height: 3.0
+  resolution: 0.05
+  transform_tolerance: 1.0
