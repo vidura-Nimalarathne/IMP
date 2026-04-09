@@ -2,14 +2,20 @@
 roscore
 
 2
+source /opt/ros/melodic/setup.bash
 source ~/catkin_ws/devel/setup.bash
 roslaunch rplidar_ros rplidar_c1.launch
 
 3
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
 python ~/robot_project/jcserver_mapping_ros.py
 
 4
-rosrun tf static_transform_publisher 0 0 0.1 0 0 0 base_link laser 100
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+rosrun tf static_transform_publisher 0 0 0.25 3.14159 0 0  base_link laser 100
+
 
 5
 rosrun gmapping slam_gmapping scan:=/scan _tf_delay:=0.5 _temporalUpdate:=0.5 _linearUpdate:=0.2 _angularUpdate:=0.1 _transform_publish_period:=0.05
@@ -17,3 +23,63 @@ rosrun gmapping slam_gmapping scan:=/scan _tf_delay:=0.5 _temporalUpdate:=0.5 _l
 6
 source ~/catkin_ws/devel/setup.bash
 python -u ~/robot_project/map_mjpeg_server.py
+
+7
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+rosrun map_server map_server ~/room_map_v3.yaml
+
+8
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+rosrun amcl amcl scan:=/scan \
+  _odom_frame_id:=odom \
+  _base_frame_id:=base_link \
+  _global_frame_id:=map \
+  _min_particles:=200 \
+  _max_particles:=2000 \
+  _update_min_d:=0.05 \
+  _update_min_a:=0.05 \
+  _laser_max_beams:=60 \
+  _kld_err:=0.02 \
+  _kld_z:=0.99
+
+9
+rosrun tf tf_echo odom base_link
+
+10
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+roslaunch robot_nav move_base.launch
+
+11
+nano ~/catkin_ws/src/robot_nav/config/global_costmap_params.yaml
+nano ~/catkin_ws/src/robot_nav/config/local_costmap_params.yaml
+nano ~/catkin_ws/src/robot_nav/launch/move_base.launch
+nano ~/catkin_ws/src/robot_nav/config/dwa_local_planner_params.yaml
+
+12
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+rostopic list | grep move_base
+
+rostopic echo /move_base/status
+
+rostopic echo /cmd_vel
+
+
+13
+starting dog detection
+
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+export PYTHONPATH=$PYTHONPATH:/home/vidura/jetson-inference/python/python:/home/vidura/jetson-inference/build/aarch64/lib/python/3.6:/home/vidura/jetson-inference/utils/python/python
+python ~/catkin_ws/src/robot_nav/scripts/jcserver_bridge.py
+
+14
+source /opt/ros/melodic/setup.bash
+source ~/catkin_ws/devel/setup.bash
+export PYTHONPATH=$PYTHONPATH:/home/vidura/jetson-inference/python/python:/home/vidura/jetson-inference/build/aarch64/lib/python/3.6:/home/vidura/jetson-inference/utils/python/python
+python3 ~/catkin_ws/src/robot_nav/scripts/video_serverv2.py
+
+
